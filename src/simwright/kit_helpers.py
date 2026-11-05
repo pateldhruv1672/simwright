@@ -641,7 +641,7 @@ def teleop_scene_g1(path, asset, table=True, save=True):
     d = UsdLux.DistantLight.Define(st, "/World/Sun"); d.CreateIntensityAttr(2500); UsdGeom.XformCommonAPI(d).SetRotate(Gf.Vec3f(-45, 0, 30))
     robot = st.DefinePrim("/World/G1", "Xform")
     robot.GetReferences().AddReference(asset)
-    UsdGeom.XformCommonAPI(robot).SetTranslate(Gf.Vec3d(0, 0, 0))
+    UsdGeom.XformCommonAPI(robot).SetTranslate(Gf.Vec3d(0, 0, 0.793))   # pelvis-root asset: standing pelvis height
     objects = []
     if table:
         def box(path, size, pos, color, dynamic=False, mass=None):
