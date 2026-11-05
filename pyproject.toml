@@ -4,12 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "simwright"
-version = "0.5.3"
+version = "0.5.4"
 description = "AI copilot for robot simulation: Isaac Sim, Isaac Lab, ROS 2, Gazebo and MuJoCo on Windows, WSL and Docker."
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
-dependencies = ["openai>=1.40", "mcp>=1.10"]
+dependencies = ["openai>=1.40", "mcp>=1.10", "numpy>=1.26"]
 
 [project.scripts]
 simwright = "simwright.cli:main"

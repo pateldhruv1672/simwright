@@ -619,7 +619,7 @@ def teleop_g1_stop():
 
 def teleop_scene_g1(path, asset, table=True, save=True):
     """A light scene for real-time teleop: ground, lights, the G1 asset (pinned until teleop releases it), a table with
-    graspable objects. GPU dynamics, 200 Hz, articulation solver 8/4 (what WBC-AGILE trained with)."""
+    graspable objects. CPU physics, 200 Hz, articulation solver 8/4 (what WBC-AGILE trained with)."""
     import omni.usd
     from pxr import Usd, UsdGeom, UsdPhysics, UsdLux, PhysxSchema, Gf, Sdf
     ctx = omni.usd.get_context()
@@ -630,7 +630,8 @@ def teleop_scene_g1(path, asset, table=True, save=True):
     scene = UsdPhysics.Scene.Define(st, "/World/PhysicsScene")
     scene.CreateGravityDirectionAttr(Gf.Vec3f(0, 0, -1)); scene.CreateGravityMagnitudeAttr(9.81)
     ps = PhysxSchema.PhysxSceneAPI.Apply(scene.GetPrim())
-    ps.CreateEnableGPUDynamicsAttr(True); ps.CreateBroadphaseTypeAttr("GPU"); ps.CreateSolverTypeAttr("TGS"); ps.CreateTimeStepsPerSecondAttr(200)
+    # CPU physics: for one humanoid on a simple floor it runs ~2x faster than GPU dynamics + CPU readback (measured Nov 4 2026)
+    ps.CreateEnableGPUDynamicsAttr(False); ps.CreateBroadphaseTypeAttr("MBP"); ps.CreateSolverTypeAttr("TGS"); ps.CreateTimeStepsPerSecondAttr(200)
     ps.CreateEnableCCDAttr(False)
     g = UsdGeom.Cube.Define(st, "/World/Ground"); g.CreateSizeAttr(1.0)
     UsdGeom.XformCommonAPI(g).SetScale(Gf.Vec3f(40, 40, 0.1)); UsdGeom.XformCommonAPI(g).SetTranslate(Gf.Vec3d(0, 0, -0.05))

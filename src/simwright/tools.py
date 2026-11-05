@@ -328,7 +328,7 @@ class Toolbox:
         return self.kit.call(f"teleop_g1_start({(robot or None)!r}, {int(port)}, {bool(walk)}, {int(physics_hz)}, {(actor or None)!r})", timeout=120)
 
     @tool("Create and open a light scene for real-time G1 teleoperation (ground, lights, the G1 + Revo2 asset, a table with "
-          "graspable objects; GPU dynamics, 200 Hz, AGILE's 8/4 solver). Heavy scenes such as a full warehouse can run far below "
+          "graspable objects; CPU physics, 200 Hz, AGILE's 8/4 solver). Heavy scenes such as a full warehouse can run far below "
           "real time; teleop_status reports realtime_factor.")
     def teleop_scene(self, path: str = "", asset: str = "") -> dict:
         home = os.path.expanduser("~")
