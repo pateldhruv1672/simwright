@@ -94,7 +94,7 @@ class Approver:
         self.interactive = sys.stdin.isatty() if interactive is None else interactive
         self.keys = KeyWatcher()
 
-    def decide(self, target: str, cmd: str, description: str = "", allow_dangerous: bool = False) -> str:
+    def decide(self, target: str, cmd: str, description: str = "", allow_dangerous: bool = False, detail: str = "") -> str:
         """Return 'run' or 'skip'. Always prints the command first."""
         label = f" ({description})" if description else ""
         print(f"\n\u25b6 [{target}] {cmd}{label}", flush=True)
@@ -125,7 +125,7 @@ class AutoApprover(Approver):
     def __init__(self):
         super().__init__("auto", interactive=False)
 
-    def decide(self, target, cmd, description="", allow_dangerous=False):
+    def decide(self, target, cmd, description="", allow_dangerous=False, detail=""):
         print(f"\u25b6 [{target}] {cmd}", file=sys.stderr, flush=True)
         if is_dangerous(cmd) and not allow_dangerous:
             return "skip"
@@ -142,7 +142,7 @@ class QueueApprover(Approver):
         self._n = 0
         self.events: list[dict] = []
 
-    def decide(self, target, cmd, description="", allow_dangerous=False):
+    def decide(self, target, cmd, description="", allow_dangerous=False, detail=""):
         if self.mode == "auto" and not is_dangerous(cmd):
             self.events.append({"type": "command", "target": target, "cmd": cmd})
             return "run"
@@ -153,12 +153,20 @@ class QueueApprover(Approver):
             self._n += 1
             pid = f"p{self._n}"
             ev = threading.Event()
-            self.pending[pid] = {"id": pid, "target": target, "cmd": cmd, "description": description,
+            self.pending[pid] = {"id": pid, "target": target, "cmd": cmd, "description": description, "detail": detail,
                                  "dangerous": is_dangerous(cmd), "event": ev, "answer": None}
         self.events.append({"type": "approval", "id": pid, "target": target, "cmd": cmd, "description": description})
         ev.wait(timeout=600)
         item = self.pending.pop(pid, {})
         return "run" if item.get("answer") == "run" else "skip"
+
+    def skip_all(self) -> int:
+        n = 0
+        for item in list(self.pending.values()):
+            item["answer"] = "skip"
+            item["event"].set()
+            n += 1
+        return n
 
     def answer(self, pid: str, decision: str) -> bool:
         item = self.pending.get(pid)

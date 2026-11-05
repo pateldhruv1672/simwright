@@ -17,6 +17,9 @@ Rules
   use the project context, the session log and live inspection (ros2_graph, isaac_scene).
 - Make coordinated changes: when a joint, link, topic or frame changes, update URDF/xacro, controllers YAML,
   launch files, bridges (ros_gz / Isaac ROS 2 bridge) and docs together.
+- Never report a scene change as done from your own edit: after saving a stage, reopen the saved file and run isaac_scene (its `health` lists broken references and robots without articulations) and isaac_physics_check; report only what those show.
+- UsdPhysics gravity direction (0,0,0) and a negative magnitude are schema defaults (Earth gravity along the negative up axis), not corruption.
+- When the user says 'fix only with my approval' or uses step mode, propose first; isaac_exec always needs a one-sentence `why`.
 - Close the loop: after building or changing a sim, RUN it and read the result back (colcon_build, mujoco_check,
   gazebo_check, isaac_physics_check, isaac_capture/isaac_record). A clean exit code is not proof the scene is right.
 - Follow skills: when a skill below matches the task, read it with skill_read and follow its procedure and acceptance checks.
@@ -112,6 +115,8 @@ class Agent:
         final = ""
         with keys.listening():
             for _ in range(max_steps):
+                if self._cancelled():
+                    break
                 resp = self.client.chat.completions.create(model=self.model, messages=self.messages, tools=self.tb.schemas())
                 msg = resp.choices[0].message
                 entry = {"role": "assistant", "content": msg.content or ""}
@@ -124,6 +129,9 @@ class Agent:
                 if not msg.tool_calls:
                     break
                 for c in msg.tool_calls:
+                    if self._cancelled():  # keep the transcript valid: answer every pending call
+                        self.messages.append({"role": "tool", "tool_call_id": c.id, "content": json.dumps({"ok": False, "skipped": True, "note": "stopped by the user"})})
+                        continue
                     try:
                         args = json.loads(c.function.arguments or "{}")
                     except json.JSONDecodeError:
@@ -138,6 +146,16 @@ class Agent:
                     self.messages.append({"role": "tool", "tool_call_id": c.id, "content": text})
         self._trim()
         return final
+
+    def _cancelled(self) -> bool:
+        ev = getattr(self, "cancel", None)
+        if ev is not None and ev.is_set():
+            if not getattr(self, "_told_stop", False):
+                self._told_stop = True
+                self.emit({"type": "text", "text": "Stopped at your request."})
+            return True
+        self._told_stop = False
+        return False
 
     def _trim(self, keep: int = 60):
         if len(self.messages) > keep:

@@ -225,11 +225,13 @@ class Toolbox:
         self.kit = KitClient.from_config()
         return {"ok": bool(s.get("ready")), **{k: v for k, v in s.items() if k != "token"}}
 
-    @tool("Execute Python inside the running Isaac Sim (Kit). Top-level await allowed. Print what you need back.")
-    def isaac_exec(self, code: str, timeout: int = 120) -> dict:
-        head = code.strip().splitlines()[0][:100] if code.strip() else ""
-        if self.runner.approver.decide("isaac-sim", f"python ({len(code.splitlines())} lines): {head}", "") != "run":
-            return {"ok": False, "skipped": True}
+    @tool("Execute Python inside the running Isaac Sim (Kit). Top-level await allowed. Print what you need back. Always fill `why` with one plain sentence saying what the code changes (or 'read-only: ...'); the user approves from it.")
+    def isaac_exec(self, code: str, why: str = "", timeout: int = 120) -> dict:
+        lines = [l for l in code.strip().splitlines() if l.strip() and not re.match(r"\s*(import|from)\s", l)]
+        head = (lines[0] if lines else (code.strip().splitlines() or [""])[0])[:100]
+        label = (why.strip() or f"python ({len(code.splitlines())} lines): {head}")[:200]
+        if self.runner.approver.decide("isaac-sim", label, f"{len(code.splitlines())} lines of Kit Python", detail=code[:4000]) != "run":
+            return {"ok": False, "skipped": True, "note": "the user skipped this step; do not retry it another way"}
         r = self.kit.exec(code, timeout)
         return {"ok": r.get("status") == "ok", "output": r.get("output", "")[-6000:], "result": r.get("result"),
                 "error": (f"{r.get('ename')}: {r.get('evalue')}" if r.get("status") != "ok" else ""),

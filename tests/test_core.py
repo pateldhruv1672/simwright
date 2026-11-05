@@ -427,3 +427,42 @@ def test_find_root_ignores_global_dir(tmp_path, monkeypatch):
     (home / "robotics" / "SIMWRIGHT.md").write_text("# ctx")
     assert context.find_root() == home / "robotics"       # nearest real marker
     assert context.find_root(str(ws), exact=True) == ws   # explicit --root wins
+
+
+def test_serve_queue_and_stop(tmp_path, monkeypatch):
+    import threading, time as _t
+    from simwright import serve, agent as agentmod
+    monkeypatch.setattr(config, "HOME", tmp_path / "home")
+    ran = []
+
+    class FakeAgent:
+        def __init__(self, root, tb, emit=None):
+            self.emit = emit
+        def turn(self, prompt):
+            ran.append(prompt)
+            for _ in range(100):
+                if getattr(self, "cancel", None) is not None and self.cancel.is_set():
+                    self.emit({"type": "text", "text": "Stopped at your request."})
+                    return
+                _t.sleep(0.01)
+    monkeypatch.setattr(agentmod, "Agent", FakeAgent)
+    st = serve.State(tmp_path)
+    assert st.submit("first")["queued"] == 0
+    assert st.submit("second")["queued"] == 1 and st.submit("third")["queued"] == 2
+    _t.sleep(0.05)
+    r = st.stop()
+    assert r["dropped"] == 2 and r["was_busy"]
+    for _ in range(200):
+        if not st.busy:
+            break
+        _t.sleep(0.01)
+    assert not st.busy and ran == ["first"]
+    types = [e["type"] for e in st.events]
+    assert types.count("queued") == 2 and "stopping" in types and "idle" in types
+    assert any(e.get("text") == "Stopped at your request." for e in st.events)
+    assert st.submit("after")["queued"] == 0       # cancel flag is reset for the next request
+    for _ in range(300):
+        if not st.busy:
+            break
+        _t.sleep(0.01)
+    assert ran == ["first", "after"]

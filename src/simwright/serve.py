@@ -17,6 +17,8 @@ class State:
         self.busy = False
         self.agent = None
         self.lock = threading.Lock()
+        self.queue: list[str] = []
+        self.cancel = threading.Event()
 
     def emit(self, ev):
         with self.lock:
@@ -26,9 +28,40 @@ class State:
         while self.approver.events:
             self.emit(self.approver.events.pop(0))
 
+    def submit(self, prompt: str) -> dict:
+        """Run now, or queue behind the current request (never reject)."""
+        with self.lock:
+            if self.busy:
+                self.queue.append(prompt)
+                pos = len(self.queue)
+                self.events.append({"n": len(self.events), "t": time.time(), "type": "queued", "text": prompt, "position": pos})
+                return {"ok": True, "queued": pos}
+            self.busy = True
+        threading.Thread(target=self._run, args=(prompt,), daemon=True).start()
+        return {"ok": True, "queued": 0}
+
+    def stop(self) -> dict:
+        with self.lock:
+            dropped = len(self.queue)
+            self.queue.clear()
+        if self.busy:
+            self.cancel.set()
+        skipped = self.approver.skip_all()
+        self.emit({"type": "stopping", "text": f"Stopping after the current step (skipped {skipped} approval(s), dropped {dropped} queued)."})
+        return {"ok": True, "was_busy": self.busy, "skipped_approvals": skipped, "dropped": dropped}
+
+    def _run(self, prompt):
+        while prompt is not None:
+            self.ask(prompt)
+            with self.lock:
+                prompt = self.queue.pop(0) if self.queue else None
+                if prompt is None:
+                    self.busy = False
+        self.emit({"type": "idle"})
+
     def ask(self, prompt):
         from .agent import Agent
-        self.busy = True
+        self.cancel.clear()
         self.emit({"type": "user", "text": prompt})
         stop = threading.Event()
 
@@ -41,13 +74,13 @@ class State:
         try:
             if self.agent is None:
                 self.agent = Agent(self.root, self.tb, emit=self.emit)
+            self.agent.cancel = self.cancel
             self.agent.turn(prompt)
         except Exception as e:
             self.emit({"type": "error", "text": f"{type(e).__name__}: {e}"})
         finally:
             stop.set()
             self.drain_approver()
-            self.busy = False
             self.emit({"type": "done"})
 
 
@@ -77,10 +110,10 @@ def make_handler(state: State, token: str):
                 since = int(self.path.split("since=")[-1]) if "since=" in self.path else 0
                 with state.lock:
                     evs = state.events[since:]
-                self._json(200, {"events": evs, "busy": state.busy, "pending": [
+                self._json(200, {"events": evs, "busy": state.busy, "queued": len(state.queue), "pending": [
                     {k: v for k, v in p.items() if k != "event"} for p in state.approver.pending.values()]})
             elif self.path.startswith("/status"):
-                self._json(200, {"ok": True, "root": str(state.root), "busy": state.busy, "mode": state.approver.mode})
+                self._json(200, {"ok": True, "root": str(state.root), "busy": state.busy, "queued": len(state.queue), "mode": state.approver.mode})
             else:
                 self._json(404, {"error": "not found"})
 
@@ -90,10 +123,12 @@ def make_handler(state: State, token: str):
             n = int(self.headers.get("Content-Length") or 0)
             data = json.loads(self.rfile.read(n) or b"{}")
             if self.path == "/ask":
-                if state.busy:
-                    return self._json(409, {"error": "busy"})
-                threading.Thread(target=state.ask, args=(data.get("prompt", ""),), daemon=True).start()
-                self._json(200, {"ok": True})
+                prompt = (data.get("prompt") or "").strip()
+                if not prompt:
+                    return self._json(400, {"error": "empty prompt"})
+                self._json(200, state.submit(prompt))
+            elif self.path == "/stop":
+                self._json(200, state.stop())
             elif self.path == "/approve":
                 self._json(200, {"ok": state.approver.answer(data.get("id", ""), data.get("decision", "skip"))})
             elif self.path == "/mode":

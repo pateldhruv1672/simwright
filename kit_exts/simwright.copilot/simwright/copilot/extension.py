@@ -1,4 +1,4 @@
-import asyncio, json, os, pathlib, time, urllib.request
+import asyncio, json, os, pathlib, time, urllib.error, urllib.request
 
 import carb
 import omni.ext
@@ -66,29 +66,43 @@ class SimwrightCopilotExtension(omni.ext.IExt):
 
     def _build_ui(self):
         ui = self._ui
-        self._window = ui.Window("Simwright", width=440, height=600)
+        self._window = ui.Window("Simwright", width=460, height=640)
         with self._window.frame:
             with ui.VStack(spacing=6, style={"margin": 4}):
                 self._status = ui.Label("", height=18, style={"color": 0xFF9A9A9A})
-                with ui.ScrollingFrame(height=ui.Fraction(1), horizontal_scrollbar_policy=ui.ScrollBarPolicy.SCROLLBAR_ALWAYS_OFF):
+                self._scroll = ui.ScrollingFrame(height=ui.Fraction(1), horizontal_scrollbar_policy=ui.ScrollBarPolicy.SCROLLBAR_ALWAYS_OFF)
+                with self._scroll:
                     self._log = ui.VStack(spacing=6, height=0)
-                self._approvals = ui.VStack(spacing=4, height=0)
+                self._approvals = ui.VStack(spacing=6, height=0)
                 self._prompt = ui.StringField(height=64, multiline=True)
                 with ui.HStack(height=26, spacing=6):
                     ui.Button("Send", clicked_fn=self._on_send)
                     ui.Button("Check scene", clicked_fn=lambda: self._send(
                         "Check the open scene: physics stability, lighting, articulations and anything that will break. Fix only with my approval."))
+                    ui.Button("Stop", width=60, clicked_fn=self._on_stop)
                     self._mode = ui.ComboBox(1, "auto", "step", "ask", width=70)
         self._refresh_status()
 
-    def _refresh_status(self):
+    def _refresh_status(self, busy=None, queued=0):
         s = self._serve()
-        self._status.text = (f"connected to simwright serve ({s.get('root','')})" if s else
-                             "start `simwright serve` in your robot workspace to use the panel")
+        if not s:
+            self._status.text = "start `simwright serve` in your robot workspace to use the panel"
+            return
+        state = "" if busy is None else ("working" + (f" ({queued} queued)" if queued else "") + " · " if busy else "idle · ")
+        self._status.text = f"{state}simwright serve: {s.get('root', '')}"
 
     def _line(self, text, color=0xFFDDDDDD):
         with self._log:
             self._ui.Label(text, word_wrap=True, height=0, style={"color": color})
+        asyncio.ensure_future(self._scroll_end())
+
+    async def _scroll_end(self):
+        import omni.kit.app
+        await omni.kit.app.get_app().next_update_async()
+        try:
+            self._scroll.scroll_y = self._scroll.scroll_y_max
+        except Exception:
+            pass
 
     def _on_send(self):
         text = self._prompt.model.get_value_as_string().strip()
@@ -96,21 +110,55 @@ class SimwrightCopilotExtension(omni.ext.IExt):
             self._prompt.model.set_value("")
             self._send(text)
 
-    def _send(self, text):
+    def _endpoint(self):
         s = self._serve()
         self._refresh_status()
         if not s:
             self._line("Simwright is not running. In your workspace: simwright serve", 0xFF5A8CFF)
+            return None
+        return f"http://127.0.0.1:{s['port']}", s["token"]
+
+    def _explain(self, e):
+        if isinstance(e, urllib.error.HTTPError):
+            try:
+                body = e.read().decode()[:200]
+            except Exception:
+                body = ""
+            return f"simwright serve answered {e.code} {body}".strip()
+        if isinstance(e, urllib.error.URLError):
+            return "simwright serve is not running (start it in your workspace: simwright serve)"
+        return f"{type(e).__name__}: {e}"
+
+    def _send(self, text):
+        ep = self._endpoint()
+        if not ep:
             return
-        base, tok = f"http://127.0.0.1:{s['port']}", s["token"]
+        base, tok = ep
         modes = ["auto", "step", "ask"]
         try:
             mode = modes[self._mode.model.get_item_value_model().as_int]
             _http("POST", base + "/mode", tok, {"mode": mode})
-            _http("POST", base + "/ask", tok, {"prompt": text})
+            r = _http("POST", base + "/ask", tok, {"prompt": text})
         except Exception as e:
-            self._line(f"could not reach simwright serve: {e}", 0xFF5A8CFF)
+            self._line(self._explain(e), 0xFF5A8CFF)
             return
+        if r.get("queued"):
+            self._line(f"queued #{r['queued']} (runs after the current request): {text}", 0xFF9AB8D0)
+        self._ensure_pump(base, tok)
+
+    def _on_stop(self):
+        ep = self._endpoint()
+        if not ep:
+            return
+        try:
+            r = _http("POST", ep[0] + "/stop", ep[1], {})
+            if not r.get("was_busy"):
+                self._line("nothing is running", 0xFF9A9A9A)
+        except Exception as e:
+            self._line(self._explain(e), 0xFF5A8CFF)
+        self._ensure_pump(*ep)
+
+    def _ensure_pump(self, base, tok):
         if self._poll is None or self._poll.done():
             self._poll = asyncio.ensure_future(self._pump(base, tok))
 
@@ -121,7 +169,7 @@ class SimwrightCopilotExtension(omni.ext.IExt):
             try:
                 r = await loop.run_in_executor(None, _http, "GET", f"{base}/events?since={self._since}", tok)
             except Exception as e:
-                self._line(f"lost connection: {e}", 0xFF5A8CFF)
+                self._line("lost connection: " + self._explain(e), 0xFF5A8CFF)
                 return
             for ev in r.get("events", []):
                 self._since = ev["n"] + 1
@@ -131,29 +179,45 @@ class SimwrightCopilotExtension(omni.ext.IExt):
                 elif t == "text":
                     self._line(ev["text"])
                 elif t == "tool":
-                    self._line(f"\u2022 {ev['name']}({ev.get('args_brief','')})", 0xFF9A9A9A)
+                    self._line(f"- {ev['name']}({ev.get('args_brief', '')})", 0xFF9A9A9A)
+                elif t == "tool_result" and ev.get("ok") is False and ev.get("error"):
+                    self._line(f"  ! {ev['name']}: {str(ev['error'])[:300]}", 0xFF5A8CFF)
                 elif t == "command":
-                    self._line(f"\u25b6 [{ev['target']}] {ev['cmd']}", 0xFF9A9A9A)
+                    self._line(f"> [{ev['target']}] {ev['cmd']}", 0xFF9A9A9A)
+                elif t == "approval":
+                    self._line(f"needs your approval below: {ev.get('cmd', '')}", 0xFF8CC8FF)
+                elif t in ("stopping",):
+                    self._line(ev.get("text", "stopping"), 0xFF9AB8D0)
                 elif t == "error":
                     self._line(ev["text"], 0xFF5A8CFF)
             for p in r.get("pending", []):
                 if p["id"] not in self._shown_approvals:
                     self._shown_approvals.add(p["id"])
                     self._approval(base, tok, p)
-            idle = 0 if r.get("busy") or r.get("pending") else idle + 1
+            self._refresh_status(bool(r.get("busy")), int(r.get("queued") or 0))
+            idle = 0 if r.get("busy") or r.get("pending") or r.get("queued") else idle + 1
             await asyncio.sleep(0.5)
 
     def _approval(self, base, tok, p):
         ui = self._ui
         with self._approvals:
-            row = ui.HStack(height=24, spacing=6)
-            with row:
-                ui.Label(("DANGEROUS " if p.get("dangerous") else "") + f"[{p['target']}] {p['cmd'][:120]}", word_wrap=True)
+            box = ui.VStack(spacing=4, height=0)
+            with box:
+                head = ("DANGEROUS  " if p.get("dangerous") else "") + f"[{p['target']}] {p['cmd']}"
+                ui.Label(head, word_wrap=True, height=0, style={"color": 0xFF8CC8FF if not p.get("dangerous") else 0xFF5A8CFF})
+                if p.get("description"):
+                    ui.Label(p["description"], word_wrap=True, height=0, style={"color": 0xFF9A9A9A})
+                if p.get("detail"):
+                    with ui.CollapsableFrame("Show code", collapsed=True, height=0):
+                        ui.Label(p["detail"][:4000], word_wrap=True, height=0, style={"color": 0xFFCFCFCF, "font_size": 13})
 
-                def answer(d, row=row, pid=p["id"]):
+                def answer(d, box=box, pid=p["id"]):
                     try:
                         _http("POST", base + "/approve", tok, {"id": pid, "decision": d})
+                    except Exception as e:
+                        self._line(self._explain(e), 0xFF5A8CFF)
                     finally:
-                        row.visible = False
-                ui.Button("Run", width=50, clicked_fn=lambda: answer("run"))
-                ui.Button("Skip", width=50, clicked_fn=lambda: answer("skip"))
+                        box.visible = False
+                with ui.HStack(height=24, spacing=6):
+                    ui.Button("Run", width=70, clicked_fn=lambda: answer("run"))
+                    ui.Button("Skip", width=70, clicked_fn=lambda: answer("skip"))

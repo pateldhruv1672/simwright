@@ -1,7 +1,7 @@
 """Simwright helpers that run INSIDE Isaac Sim (Kit Python). Loaded by the simwright.copilot extension
 or sent once over the Isaac Sim python_server. Uses only USD, omni.usd, omni.timeline, omni.kit.app,
 omni.physx and omni.client so it works across Isaac Sim 5.x and 6.x."""
-import math, os, time
+import math, os, re, time
 
 try:
     import omni.usd, omni.timeline, omni.kit.app
@@ -12,7 +12,7 @@ except ImportError:  # imported outside Kit (tests): definitions only
 _ASSET_CACHE = globals().get("_ASSET_CACHE") or {}
 
 
-HELPERS_VERSION = "0.1.4"
+HELPERS_VERSION = "0.2.2"
 
 
 def _stage():
@@ -44,7 +44,7 @@ def scene_summary(max_list=40):
         t = p.GetTypeName() or "(untyped)"
         counts[t] = counts.get(t, 0) + 1
         if p.HasAPI(UsdPhysics.ArticulationRootAPI):
-            joints = [c for c in Usd.PrimRange(p) if c.IsA(UsdPhysics.Joint)]
+            joints = [c for c in Usd.PrimRange(p, Usd.TraverseInstanceProxies(Usd.PrimAllPrimsPredicate)) if c.IsA(UsdPhysics.Joint)]
             arts.append({"path": str(p.GetPath()), "joints": len(joints)})
         if p.HasAPI(UsdPhysics.RigidBodyAPI):
             rigid += 1
@@ -55,14 +55,24 @@ def scene_summary(max_list=40):
             cams.append(str(p.GetPath()))
         if t == "PhysicsScene":
             g = UsdPhysics.Scene(p)
-            scenes.append({"path": str(p.GetPath()), "gravity_dir": list(g.GetGravityDirectionAttr().Get() or []),
-                           "gravity": g.GetGravityMagnitudeAttr().Get()})
+            gd, gm = list(g.GetGravityDirectionAttr().Get() or []), g.GetGravityMagnitudeAttr().Get()
+            eff_dir = "negative up axis (schema default)" if (not gd or all(v == 0 for v in gd)) else str(gd)
+            eff_mag = "Earth gravity (schema default)" if (gm is None or gm < 0) else f"{gm} stage units/s^2"
+            scenes.append({"path": str(p.GetPath()), "gravity_dir": gd, "gravity": gm, "effective": f"{eff_mag}, along {eff_dir}"})
     tl = omni.timeline.get_timeline_interface()
     return {"stage": st.GetRootLayer().identifier, "up_axis": UsdGeom.GetStageUpAxis(st),
             "meters_per_unit": UsdGeom.GetStageMetersPerUnit(st), "prims": sum(counts.values()),
             "types": dict(sorted(counts.items(), key=lambda kv: -kv[1])[:25]), "articulations": arts[:max_list],
             "rigid_bodies": rigid, "lights": lights[:max_list], "cameras": cams[:max_list], "physics_scenes": scenes,
-            "timeline": {"playing": tl.is_playing(), "time": tl.get_current_time()}}
+            "timeline": {"playing": tl.is_playing(), "time": tl.get_current_time()}, "health": _health_brief()}
+
+
+def _health_brief():
+    try:
+        h = stage_health()
+        return {"ok": h["ok"], "issues": h["issues"][:15], "articulations": h["articulations"]}
+    except Exception as e:
+        return {"ok": None, "error": str(e)}
 
 
 def _rigid_paths(limit=300):
@@ -98,10 +108,88 @@ def light_check():
             "hint": "" if ok else "no usable light: renders will be black. Add a DomeLight (>=100) or DistantLight (>=500)"}
 
 
+ROBOT_NAME = re.compile(r"(xarm|franka|panda|ur\d|ur_|g1|h1|go2|unitree|carter|jetbot|robot|arm|humanoid|spot|anymal|allegro|shadow|kinova|iiwa)", re.I)
+
+
+def _asset_items(lst):
+    out = []
+    for attr in ("explicitItems", "prependedItems", "appendedItems", "addedItems"):
+        try:
+            out += list(getattr(lst, attr) or [])
+        except Exception:
+            pass
+    return out
+
+
+def stage_health(max_prims=50000):
+    """Static checks that a short physics run cannot catch: broken references/payloads, robot prims that never
+    loaded an articulation, invalid gravity. Gravity direction (0,0,0) and a negative magnitude are UsdPhysics
+    defaults (negative up axis, Earth gravity) and are fine."""
+    st = _stage()
+    issues, broken, n = [], [], 0
+    seen = set()
+    for prim in st.TraverseAll():
+        n += 1
+        if n > max_prims:
+            break
+        for spec in prim.GetPrimStack():
+            for kind, lst in (("reference", spec.referenceList), ("payload", spec.payloadList)):
+                for item in _asset_items(lst):
+                    ap = getattr(item, "assetPath", "") or ""
+                    if not ap:
+                        continue
+                    key = (str(prim.GetPath()), ap)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    try:
+                        resolved = Sdf.ComputeAssetPathRelativeToLayer(spec.layer, ap)
+                    except Exception:
+                        resolved = ap
+                    ok = False
+                    try:
+                        ok = Sdf.Layer.FindOrOpen(resolved) is not None
+                    except Exception:
+                        ok = False
+                    if not ok:
+                        broken.append({"prim": str(prim.GetPath()), "kind": kind, "asset": ap, "resolved": resolved,
+                                       "authored_in": spec.layer.identifier})
+    for b in broken[:20]:
+        issues.append({"severity": "error", "body": b["prim"], "issue": f"broken {b['kind']}: {b['asset']} (resolves to {b['resolved']})",
+                       "fix": "point it at the real file; relative paths resolve from the layer that authors them (" + b["authored_in"] + ")"})
+    arts = [str(p.GetPath()) for p in st.Traverse() if p.HasAPI(UsdPhysics.ArticulationRootAPI)]
+    for p in st.Traverse():
+        path = str(p.GetPath())
+        if p.GetParent() and str(p.GetParent().GetPath()) in ("/", "/World") and ROBOT_NAME.search(p.GetName()):
+            inside = any(a == path or a.startswith(path + "/") for a in arts)
+            joints = sum(1 for d in Usd.PrimRange(p, Usd.TraverseInstanceProxies(Usd.PrimAllPrimsPredicate))
+                         if d.IsA(UsdPhysics.Joint))
+            if not inside and joints == 0:
+                issues.append({"severity": "warning", "body": path, "issue": "looks like a robot but has no articulation and no joints (empty placeholder or failed load)",
+                               "fix": "reference the robot USD (or import its URDF) and check the reference resolves"})
+    for p in st.Traverse():
+        if p.IsA(UsdPhysics.Scene):
+            sc = UsdPhysics.Scene(p)
+            d = sc.GetGravityDirectionAttr().Get()
+            m = sc.GetGravityMagnitudeAttr().Get()
+            if d is not None and any(math.isnan(v) or math.isinf(v) for v in d):
+                issues.append({"severity": "error", "body": str(p.GetPath()), "issue": f"gravity direction is not finite: {tuple(d)}",
+                               "fix": "set gravityDirection to (0,0,-1) or (0,0,0) for 'negative up axis'"})
+            if m is not None and (math.isnan(m) or (math.isinf(m) and m > 0)):
+                issues.append({"severity": "error", "body": str(p.GetPath()), "issue": f"gravity magnitude is {m}",
+                               "fix": "use 9.81 (m/s^2, scaled by metersPerUnit) or any negative value for Earth gravity"})
+    return {"ok": not any(i["severity"] == "error" for i in issues), "articulations": arts[:20], "broken_references": broken[:20],
+            "issues": issues, "note": "gravity (0,0,0) / negative magnitude are UsdPhysics defaults: Earth gravity along the negative up axis"}
+
+
 async def physics_check(seconds=3.0, floor_z=0.0, keep_playing=False):
     """Play, step, and report bodies that went NaN, fell through the floor or flew away."""
     st = _stage()
     issues = []
+    try:
+        issues += stage_health()["issues"]
+    except Exception as e:
+        issues.append({"severity": "warning", "issue": f"static checks failed: {e}"})
     if not any(p.GetTypeName() == "PhysicsScene" for p in st.Traverse()):
         issues.append({"severity": "error", "issue": "no PhysicsScene prim: nothing will simulate",
                        "fix": "add a PhysicsScene (UsdPhysics.Scene.Define(stage, '/physicsScene'))"})

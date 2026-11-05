@@ -31,3 +31,9 @@ to a path recorded in SIMWRIGHT.md.
 ## Captures
 - `simwright isaac capture <abs path>` waits until the PNG is fully written; when the terminal sits in an unwritable folder (C:\Windows\System32) captures go to ~/.simwright/captures.
 - Look at the frame after every build: placement bugs (overhangs, giant props, wrong facing) show up there first.
+
+## Saving and verifying (learned Nov 2026)
+- A stage edit is not done until the saved file passes: save, reopen the file, run `isaac_scene` and `isaac_physics_check`. A run once reported "real xArm7 robots, gravity fixed, saved", and the reopened stage had empty xArm containers and a broken G1 reference.
+- Relative references resolve from the layer that authors them: a scene in `~/robotics/scenes/` referencing `../assets/usd/x.usda` means `~/robotics/assets/usd/x.usda`. Check `scene health.broken_references` after every save; prefer the exact path the importer returned.
+- UsdPhysics gravity direction (0,0,0) means "negative up axis" and a negative magnitude (even -inf) means "Earth gravity". These are valid defaults; do not call them corrupt. Set explicit values only if the user wants them.
+- `isaac_scene` → `health` reports robot-named prims with no articulation and no joints: a placeholder or a failed load, not a robot.
