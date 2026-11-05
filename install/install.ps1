@@ -8,6 +8,14 @@ param(
 )
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
+
+# Native tools (uv, git) print progress on stderr; Windows PowerShell 5.1 turns that into a terminating error under
+# "Stop". Run them with "Continue" and judge success by the exit code instead.
+function Invoke-Native([scriptblock]$Block, [string]$What) {
+  $old = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+  try { & $Block 2>&1 | ForEach-Object { "$_" } ; $code = $LASTEXITCODE } finally { $ErrorActionPreference = $old }
+  if ($code -ne 0) { throw "$What failed (exit $code)" }
+}
 Write-Host "Simwright installer" -ForegroundColor Cyan
 
 # 1. uv (manages Python and the simwright tool environment)
@@ -32,12 +40,13 @@ if ($Package -match '^https?://') {
   $src = $whl
 } elseif ($Package) { $src = (Resolve-Path $Package).Path }
 else { $src = "simwright @ git+https://github.com/pateldhruv1672/simwright@$Ref" }
-uv tool install --force --python 3.12 "$src"
-uv tool update-shell | Out-Null
+Invoke-Native { uv tool install --force --python 3.12 "$src" } "uv tool install"
+Invoke-Native { uv tool update-shell } "uv tool update-shell" | Out-Null
 $sw = Join-Path $env:USERPROFILE ".local\bin\simwright.exe"
 
 # 4. environment report
 Write-Host ""
+$ErrorActionPreference = "Continue"
 & $sw doctor
 Write-Host ""
 Write-Host "Next steps" -ForegroundColor Cyan
