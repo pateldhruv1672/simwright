@@ -415,3 +415,15 @@ def test_mcp_http_guard_and_annotations(tmp_path, monkeypatch):
         assert c.post(f"/t/{tok}/mcp", json=init, headers=hdr).status_code == 200
         assert c.post("/mcp", json=init, headers={**hdr, "Authorization": f"Bearer {tok}"}).status_code == 200
         assert c.post(f"/mcp?token={tok}", json=init, headers=hdr).status_code == 200
+
+
+def test_find_root_ignores_global_dir(tmp_path, monkeypatch):
+    home = tmp_path / "home"; (home / ".simwright").mkdir(parents=True)
+    ws = home / "robotics" / "ws"; ws.mkdir(parents=True)
+    monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(config, "HOME", home / ".simwright")
+    monkeypatch.chdir(ws)
+    assert context.find_root() == ws                      # not the home folder
+    (home / "robotics" / "SIMWRIGHT.md").write_text("# ctx")
+    assert context.find_root() == home / "robotics"       # nearest real marker
+    assert context.find_root(str(ws), exact=True) == ws   # explicit --root wins

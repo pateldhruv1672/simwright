@@ -288,7 +288,7 @@ def main(argv=None):
     for name in ("ros", "urdf", "build", "mujoco", "gazebo", "isaac", "world", "lab", "simready"):
         p = sub.add_parser(name); p.add_argument("rest", nargs=argparse.REMAINDER)
     a = ap.parse_args(argv)
-    root = context.find_root(a.root)
+    root = context.find_root(a.root, exact=bool(a.root))
     if a.cmd is None:
         return repl(root)
     if a.cmd == "init":

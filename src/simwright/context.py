@@ -12,10 +12,24 @@ SKIP_DIRS = {".git", "build", "install", "log", "node_modules", ".venv", "venv",
 MARKERS = ["SIMWRIGHT.md", "DRIFT.md", "CLAUDE.md", "AGENTS.md", ".git", "colcon.meta", ".simwright"]
 
 
-def find_root(start: str | os.PathLike | None = None) -> pathlib.Path:
-    p = pathlib.Path(start or os.getcwd()).resolve()
+def find_root(start: str | os.PathLike | None = None, exact: bool = False) -> pathlib.Path:
+    """exact=True (an explicit --root): use the folder as given. Otherwise walk up from `start` (default: the current
+    folder) to the nearest project marker, ignoring the global settings folder (~/.simwright) and never climbing past
+    the home folder; if none is found, the starting folder itself."""
+    p = pathlib.Path(start or os.getcwd()).expanduser().resolve()
+    if exact:
+        return p
+    from . import config
+    try:
+        global_dir = pathlib.Path(config.HOME).resolve()
+    except Exception:
+        global_dir = None
+    home = pathlib.Path.home().resolve()
     for d in [p, *p.parents]:
-        if any((d / m).exists() for m in MARKERS) or (d / "src").is_dir() and any((d / "src").rglob("package.xml")):
+        if d == home or d == pathlib.Path(d.anchor):
+            break
+        marks = [m for m in MARKERS if (d / m).exists() and not (m == ".simwright" and (d / m).resolve() == global_dir)]
+        if marks or ((d / "src").is_dir() and any((d / "src").glob("*/package.xml"))):
             return d
     return p
 

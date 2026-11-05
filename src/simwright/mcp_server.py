@@ -1,4 +1,4 @@
-"""Simwright MCP server: the Simwright toolbox for Claude Code, Codex, Cursor, VS Code, Claude Desktop and ChatGPT.
+r"""Simwright MCP server: the Simwright toolbox for Claude Code, Codex, Cursor, VS Code, Claude Desktop and ChatGPT.
 
 Local clients (stdio):   simwright-mcp --root C:\path\to\ws          (or: simwright connect claude|codex|cursor|vscode)
 ChatGPT (remote HTTP):   simwright-mcp --http --tunnel --root C:\path\to\ws
@@ -191,7 +191,7 @@ def serve_http(root: pathlib.Path, host: str = "127.0.0.1", port: int = 8765, re
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="simwright-mcp", description="Simwright tools over MCP (stdio by default)")
-    ap.add_argument("--root", default=".", help="robot workspace (default: detected from the current folder)")
+    ap.add_argument("--root", default="", help="robot workspace (default: detected from the current folder)")
     ap.add_argument("--read-only", action="store_true", help="expose only tools that never change anything")
     ap.add_argument("--http", action="store_true", help="serve Streamable HTTP (for ChatGPT and remote clients)")
     ap.add_argument("--host", default="127.0.0.1")
@@ -200,7 +200,7 @@ def main(argv=None):
     ap.add_argument("--new-token", action="store_true", help="with --http: rotate the access token")
     a = ap.parse_args(argv)
     from .context import find_root
-    root = find_root(a.root)
+    root = find_root(a.root or None, exact=bool(a.root))
     if a.http:
         return serve_http(root, a.host, a.port, a.read_only, a.tunnel, a.new_token)
     real = sys.stdout
