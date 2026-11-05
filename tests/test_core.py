@@ -841,3 +841,30 @@ def test_rosbridge_pieces(tmp_path, monkeypatch):
     assert not bad["ok"]
     s = rb.check_script(31, ["/clock", "/a/joint_states"])
     assert "ROS_DOMAIN_ID=31" in s and "SWJSON" in s
+
+
+
+def test_kit_call_expressions_are_python(tmp_path, monkeypatch):
+    """Every expression a tool sends to Isaac Sim must compile as Python (no JSON null/true/false)."""
+    import ast
+    from simwright.tools import Toolbox
+    sent = []
+
+    class FakeKit:
+        def call(self, expr, timeout=None):
+            ast.parse("async def _f():\n    _r = " + expr.replace("\n", "\n    "))
+            sent.append(expr)
+            return {"ok": True, "topics": []}
+
+    tb = Toolbox(tmp_path)
+    tb.kit = FakeKit()
+    tb.runner.approver.mode = "auto"
+    tb.isaac_place("C:/a.usd", "/World/a")
+    tb.isaac_place("C:/a.usd", "/World/a", on="/World/table", z=0.5)
+    tb.isaac_mount("cam", "camera", "/World/arm/link7")
+    tb.isaac_mount("cam", "C:/c.usd", "/World/arm/link7", look="+x", offset=[0, 0, 0.01])
+    tb.ros_bridge_graph()
+    tb.ros_bridge_graph(robots=["/World/r"], cameras=["/World/cam"], persist=True)
+    tb.isaac_physics_repair("/World")
+    tb.isaac_placement_audit("/World")
+    assert len(sent) >= 9 and not any(" null" in s or "(null" in s for s in sent)

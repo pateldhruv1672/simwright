@@ -350,7 +350,7 @@ class Toolbox:
         en = self.kit.call(f"ros_bridge_enable({json.dumps(s_['distro'])}, {int(s_['domain_id'])}, {json.dumps(s_['profile'])})", timeout=180)
         if not en.get("ok"):
             return {"ok": False, "enable": en}
-        r = self.kit.call(f"ros_bridge_graph({json.dumps(robots)}, True, True, {bool(joint_commands)}, {bool(tf)}, {json.dumps(cameras or [])}, "
+        r = self.kit.call(f"ros_bridge_graph({robots!r}, True, True, {bool(joint_commands)}, {bool(tf)}, {list(cameras or [])!r}, "
                           f"{int(s_['domain_id'])}, persist={bool(persist)})", timeout=180)
         if isinstance(r, dict) and r.get("ok"):
             self.session.log({"type": "scene", "what": f"ROS 2 graph: {', '.join(t['topic'] for t in r.get('topics', []))[:180]}"})
@@ -428,7 +428,7 @@ class Toolbox:
         xy = f"{float(x)}, {float(y)}" if (use_xy or not on) else "None, None"
         zz = "None" if z is None or z < 0 else str(float(z))
         r = self.kit.call(f"place_usd({json.dumps(prim_path)}, {json.dumps(url.replace(chr(92), '/'))}, {xy}, {float(yaw)}, "
-                          f"{zz}, {json.dumps(on or None)}, {json.dumps(physics)})", timeout=300)
+                          f"{zz}, {(on or None)!r}, {json.dumps(physics)})", timeout=300)
         if isinstance(r, dict) and r.get("ok"):
             self.session.log({"type": "scene", "what": f"placed {prim_path} from {url.rsplit('/', 1)[-1]} bottom {r.get('bottom_m')} m"
                               + (f" on {on}" if on else "")})
@@ -444,7 +444,7 @@ class Toolbox:
         rp = [float(v) for v in (rpy or [0, 0, 0])][:3]
         u = url if url == "camera" else url.replace(chr(92), "/")
         r = self.kit.call(f"mount({json.dumps(name)}, {json.dumps(u)}, {json.dumps(link)}, {json.dumps(face)}, {off}, {rp}, "
-                          f"{json.dumps(look or None)}, {float(gap)}, {json.dumps(kind)})", timeout=120)
+                          f"{(look or None)!r}, {float(gap)}, {json.dumps(kind)})", timeout=120)
         if isinstance(r, dict) and r.get("ok"):
             self.session.log({"type": "scene", "what": f"mounted {name} on {link} face {face}" + (f" looking {look}" if look else "")})
         return r
@@ -494,7 +494,7 @@ class Toolbox:
         usd = simready.local(url).replace("\\", "/")
         xy = f"{float(x)}, {float(y)}" if (use_xy or not on) else "None, None"
         r = self.kit.call(f"place_usd({json.dumps(prim_path)}, {json.dumps(usd)}, {xy}, {float(yaw)}, None, "
-                          f"{json.dumps(on or None)}, {json.dumps(physics)})", timeout=300)
+                          f"{(on or None)!r}, {json.dumps(physics)})", timeout=300)
         if isinstance(r, dict):
             r["local_usd"] = usd
             if r.get("ok"):
