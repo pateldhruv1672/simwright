@@ -12,6 +12,9 @@ except ImportError:  # imported outside Kit (tests): definitions only
 _ASSET_CACHE = globals().get("_ASSET_CACHE") or {}
 
 
+HELPERS_VERSION = "0.1.2"
+
+
 def _stage():
     return omni.usd.get_context().get_stage()
 
@@ -144,11 +147,17 @@ async def capture(path, frames_before=4):
     vp = get_active_viewport()
     if vp is None:
         return {"ok": False, "error": "no active viewport (headless without a viewport?)"}
+    path = os.path.abspath(path)
     cap = capture_viewport_to_file(vp, file_path=path, is_hdr=False)
     await cap.wait_for_result()
-    for _ in range(2):
+    size, last, stable = 0, -1, 0
+    for _ in range(240):  # the PNG is written after the capture resolves; wait until its size settles
         await _app().next_update_async()
-    size = os.path.getsize(path) if os.path.exists(path) else 0
+        size = os.path.getsize(path) if os.path.exists(path) else 0
+        stable = stable + 1 if size and size == last else 0
+        last = size
+        if stable >= 3:
+            break
     return {"ok": size > 0, "path": path, "bytes": size,
             "hint": "" if size > 150_000 else "small frame: probably black or empty; check lights and camera"}
 
@@ -243,6 +252,75 @@ def place_asset(path, url, x, y, yaw_deg=0.0, fit=None, z=0.0, kind=""):
         holder.GetPrim().CreateAttribute("simwright:kind", Sdf.ValueTypeNames.String).Set(kind)
     rr = _bbox(holder.GetPrim())
     return {"path": path, "url": url, "scale": round(s, 4), "bbox_min": list(rr.GetMin()), "bbox_max": list(rr.GetMax())}
+
+
+def place_usd(path, url, x=None, y=None, yaw_deg=0.0, z=None, on=None, physics="auto", target_size=None):
+    """Reference a USD (local file or URL) at `path`, correct its units and up axis, rotate about Z and rest its
+    bbox bottom at z (default: the floor, or the top of prim `on`), centered on (x, y) (default: the center of `on`).
+    physics: auto (keep the asset's own physics, else add a static collider), dynamic, static, none."""
+    st = _stage()
+    smpu = UsdGeom.GetStageMetersPerUnit(st) or 1.0
+    pr = st.DefinePrim(path, "Xform")
+    pr.GetReferences().ClearReferences()
+    pr.GetReferences().AddReference(url)
+    lay = Sdf.Layer.FindOrOpen(url)
+    info = lay.pseudoRoot if lay else None
+    ampu = (info.GetInfo("metersPerUnit") if info is not None and info.HasInfo("metersPerUnit") else 0.01) or 0.01
+    up = info.GetInfo("upAxis") if info is not None and info.HasInfo("upAxis") else "Y"
+    k = ampu / smpu
+    xf = UsdGeom.Xformable(pr)
+    xf.ClearXformOpOrder()
+    t_op, r_op, s_op = xf.AddTranslateOp(), xf.AddRotateXYZOp(), xf.AddScaleOp()
+    s_op.Set(Gf.Vec3f(k, k, k))
+    r_op.Set(Gf.Vec3f(90.0 if up == "Y" else 0.0, 0.0, float(yaw_deg)))
+    t_op.Set(Gf.Vec3d(0, 0, 0))
+    b = _bbox(pr)
+    if b.IsEmpty():
+        return {"ok": False, "path": path, "error": "asset has no renderable geometry (empty bounds)"}
+    if target_size:
+        ext = b.GetMax() - b.GetMin()
+        k2 = (target_size / smpu) / max(ext[0], ext[1], ext[2])
+        s_op.Set(Gf.Vec3f(k * k2, k * k2, k * k2))
+        b = _bbox(pr)
+    support = None
+    if on:
+        sp = st.GetPrimAtPath(on)
+        if not sp or not sp.IsValid():
+            return {"ok": False, "path": path, "error": f"support prim {on} not found"}
+        support = _bbox(sp)
+        if x is None:
+            x = (support.GetMin()[0] + support.GetMax()[0]) / 2 * smpu
+        if y is None:
+            y = (support.GetMin()[1] + support.GetMax()[1]) / 2 * smpu
+        if z is None:
+            z = support.GetMax()[2] * smpu + 0.002
+    x, y, z = float(x or 0.0), float(y or 0.0), float(z or 0.0)
+    mn, mx = b.GetMin(), b.GetMax()
+    t_op.Set(Gf.Vec3d(x / smpu - (mn[0] + mx[0]) / 2, y / smpu - (mn[1] + mx[1]) / 2, z / smpu - mn[2]))
+    has_body = any(p.HasAPI(UsdPhysics.RigidBodyAPI) or p.HasAPI(UsdPhysics.ArticulationRootAPI) for p in Usd.PrimRange(pr))
+    has_col = any(p.HasAPI(UsdPhysics.CollisionAPI) for p in Usd.PrimRange(pr))
+    added = ""
+    if physics in ("static", "dynamic") or (physics == "auto" and not has_col):
+        approx = "convexHull" if physics == "dynamic" else "convexDecomposition"
+        for p in Usd.PrimRange(pr):
+            if p.IsA(UsdGeom.Mesh) and not p.HasAPI(UsdPhysics.CollisionAPI):
+                UsdPhysics.CollisionAPI.Apply(p)
+                UsdPhysics.MeshCollisionAPI.Apply(p).CreateApproximationAttr(approx)
+        added = "colliders"
+    if physics == "dynamic" and not has_body:
+        UsdPhysics.RigidBodyAPI.Apply(pr)
+        UsdPhysics.MassAPI.Apply(pr).CreateDensityAttr(600.0)
+        added += "+rigid body"
+    rb = _bbox(pr)
+    out = {"ok": True, "path": path, "url": url, "scale": round(k, 5), "up_axis": up,
+           "bbox_min": [round(v * smpu, 4) for v in rb.GetMin()], "bbox_max": [round(v * smpu, 4) for v in rb.GetMax()],
+           "size_m": [round((rb.GetMax()[i] - rb.GetMin()[i]) * smpu, 4) for i in range(3)],
+           "asset_physics": {"rigid_body": has_body, "colliders": has_col}, "added": added}
+    if support is not None:
+        out["on"] = on
+        out["inside_support_xy"] = bool(rb.GetMin()[0] >= support.GetMin()[0] - 1e-3 and rb.GetMax()[0] <= support.GetMax()[0] + 1e-3
+                                        and rb.GetMin()[1] >= support.GetMin()[1] - 1e-3 and rb.GetMax()[1] <= support.GetMax()[1] + 1e-3)
+    return out
 
 
 def build_room(width, depth, height=3.0, wall=0.1, root="/World/Room"):

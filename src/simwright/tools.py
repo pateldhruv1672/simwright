@@ -31,6 +31,17 @@ class Toolbox:
         q = pathlib.Path(p).expanduser()
         return q if q.is_absolute() else (self.root / q)
 
+    def _out(self, rel: str) -> pathlib.Path:
+        """Output files (captures, recordings) go under the workspace's .simwright, unless the shell sits somewhere
+        unwritable such as C:\\Windows\\System32; then under ~/.simwright."""
+        q = pathlib.Path(rel).expanduser()
+        if q.is_absolute():
+            return q
+        rel_tail = rel[len(".simwright/"):] if rel.startswith(".simwright/") else rel
+        root = self.root.resolve()
+        bad = "windows" in [part.lower() for part in root.parts[:2]] or not os.access(root, os.W_OK)
+        return (config.HOME / rel_tail) if bad else (root / rel)
+
     def _rel(self, p: pathlib.Path) -> str:
         try:
             return p.resolve().relative_to(self.root.resolve()).as_posix()
@@ -234,12 +245,45 @@ class Toolbox:
 
     @tool("Save a viewport screenshot (PNG) to a path on this machine.")
     def isaac_capture(self, path: str = ".simwright/captures/frame.png") -> dict:
-        p = str(self._abs(path)).replace("\\", "/")
-        return self.kit.call(f"await capture({json.dumps(p)})", timeout=120)
+        p = str(self._out(path)).replace("\\", "/")
+        return self.kit.call(f"await capture({json.dumps(p)})", timeout=180)
+
+    # ---------- SimReady Central (NVIDIA's index of simulation-ready OpenUSD assets on Hugging Face) ----------
+    @tool("Search SimReady Central for simulation-ready USD assets (physics, materials, real-world scale). Returns name, "
+          "url, dataset, revision, real size in meters [x,y,z] and a thumbnail. Optional max_size_m/min_size_m filter "
+          "the largest side; dataset restricts to one HF dataset, e.g. nvidia/simready-assets.")
+    def simready_search(self, query: str, limit: int = 8, max_size_m: float = 0.0, min_size_m: float = 0.0, dataset: str = "") -> dict:
+        from . import simready
+        return simready.search(query, limit, max_size_m or None, min_size_m or None, dataset)
+
+    @tool("Download a SimReady asset's whole package (USD, physics sidecar, materials, license, validation reports) at "
+          "the revision the index pinned, into the local cache. Returns local_usd and the license.")
+    def simready_fetch(self, url: str) -> dict:
+        from . import simready
+        return simready.fetch(url)
+
+    @tool("Place a SimReady asset (url from simready_search, fetched automatically) or any local USD into the open "
+          "Isaac Sim stage at metric scale. Rests on the floor at (x, y) or on top of prim `on` (e.g. /World/Kitchen/table; "
+          "x/y default to its center). yaw in degrees. physics: auto (keep the asset's own), dynamic, static, none.")
+    def simready_place(self, url: str, prim_path: str, x: float = 0.0, y: float = 0.0, yaw: float = 0.0, on: str = "",
+                       physics: str = "auto", use_xy: bool = True) -> dict:
+        from . import simready
+        usd = simready.local(url).replace("\\", "/")
+        xy = f"{float(x)}, {float(y)}" if (use_xy or not on) else "None, None"
+        r = self.kit.call(f"place_usd({json.dumps(prim_path)}, {json.dumps(usd)}, {xy}, {float(yaw)}, None, "
+                          f"{json.dumps(on or None)}, {json.dumps(physics)})", timeout=300)
+        if isinstance(r, dict):
+            r["local_usd"] = usd
+        return r
+
+    @tool("List SimReady packages already downloaded on this machine, with source revision and license.")
+    def simready_catalog(self) -> dict:
+        from . import simready
+        return {"ok": True, "cache": str(simready.cache_root()), "assets": simready.catalog()}
 
     @tool("Play and record the viewport to an MP4 (needs ffmpeg) for verification videos.")
     def isaac_record(self, seconds: float = 4.0, fps: int = 15, name: str = "") -> dict:
-        folder = self._abs(f".simwright/captures/{name or time.strftime('%Y%m%d-%H%M%S')}")
+        folder = self._out(f".simwright/captures/{name or time.strftime('%Y%m%d-%H%M%S')}")
         r = self.kit.call(f"await record({json.dumps(str(folder).replace(chr(92), '/'))}, {float(seconds)}, {int(fps)})",
                           timeout=seconds * 60 + 120)
         if r.get("ok"):

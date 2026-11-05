@@ -5,6 +5,7 @@ import json, os, pathlib, re, socket, subprocess, sys, time
 from . import config
 
 HELPERS = (pathlib.Path(__file__).parent / "kit_helpers.py").read_text(encoding="utf-8")
+HELPERS_VERSION = (re.search(r'HELPERS_VERSION = "([^"]+)"', HELPERS) or [None, ""])[1]
 
 
 class KitError(RuntimeError):
@@ -71,7 +72,9 @@ class KitClient:
         """Use the installed simwright.copilot extension's helpers when present, else send them inline."""
         if self._prefix is None:
             r = self.exec("try:\n    import simwright.copilot.helpers\n    print('ext')\nexcept Exception:\n    print('none')", 30)
-            self._prefix = "from simwright.copilot.helpers import *" if "ext" in r.get("output", "") else HELPERS
+            self._prefix = ("import importlib, simwright.copilot.helpers as _swh\n"
+                            f"if getattr(_swh, 'HELPERS_VERSION', '') != {HELPERS_VERSION!r}:\n    importlib.reload(_swh)\n"
+                            "from simwright.copilot.helpers import *") if "ext" in r.get("output", "") else HELPERS
         return self._prefix
 
     def ping(self) -> dict:

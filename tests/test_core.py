@@ -297,3 +297,50 @@ def test_lab_discovery(tmp_path, monkeypatch):
     L = lab.Lab.__new__(lab.Lab); L.cfg = cfg; L.lib = "rsl_rl"; L.python = beta["python"]; L.dir = pathlib.Path(beta["dir"])
     cmd = L.train_cmd("Isaac-Cartpole-v0", max_iterations=10)
     assert beta["python"] in cmd and "train.py" in cmd and str(L.dir) in cmd and "isaaclab.sh" not in cmd and "isaaclab.bat" not in cmd
+
+
+def test_simready(tmp_path, monkeypatch):
+    from simwright import simready
+    monkeypatch.setattr(config, "HOME", tmp_path / "home")
+    U = "https://huggingface.co/datasets/nvidia/simready-assets/blob/abc123def4567/kettle_a01/simready_usd/sm_kettle_a01_01.usd"
+    def fake_http(method, url, body=None, timeout=90, params=None):
+        if url.endswith("/search_hybrid"):
+            assert body["description"] == "kettle" and body["return_usd_dimensions"]
+            return {"total": 2, "hits": [
+                {"score": 1.2, "source": {"path": "hf://huggingface.co/datasets/nvidia/simready-assets/resolve/abc123def4567/kettle_a01/simready_usd/sm_kettle_a01_01.usd",
+                 "usd_dimensions": {"scaled_bbox_dimension_x": 0.16, "scaled_bbox_dimension_y": 0.22, "scaled_bbox_dimension_z": 0.25, "scene_mpu": 1}}},
+                {"score": 1.1, "source": {"path": "hf://huggingface.co/datasets/x/y/resolve/r1/big/a.usd",
+                 "usd_dimensions": {"scaled_bbox_dimension_x": 2.0, "scaled_bbox_dimension_y": 1, "scaled_bbox_dimension_z": 1, "scene_mpu": 1}}}]}
+        assert url.endswith("/download/asset") and params["manifest_only"] == "true"
+        base = "https://huggingface.co/datasets/nvidia/simready-assets/blob/abc123def4567/kettle_a01/"
+        return {"files": [{"url": base + "com.nvidia.simready.packaging.json", "size": 30},
+                          {"url": base + ".metadata/LICENSE.txt", "size": 31},
+                          {"url": base + "simready_usd/sm_kettle_a01_01.usd", "size": 5}]}
+    payload = {"com.nvidia.simready.packaging.json": b'{"license": "CC-BY-4.0", "name": "x"}' + b" " * 0,
+               "LICENSE.txt": b"Attribution 4.0 International\n" , "sm_kettle_a01_01.usd": b"#usda"}
+    def fake_dl(url, dest, size):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        data = payload[dest.name]
+        dest.write_bytes(data)
+        return len(data)
+    monkeypatch.setattr(simready, "_http", fake_http)
+    monkeypatch.setattr(simready, "_download", fake_dl)
+    r = simready.search("kettle", max_size_m=0.5)
+    assert len(r["hits"]) == 1 and r["hits"][0]["dims_m"] == [0.16, 0.22, 0.25] and r["hits"][0]["name"] == "kettle_a01"
+    assert r["hits"][0]["url"] == U and r["hits"][0]["thumbnail"].endswith("/simready_usd/.thumbs/256x256/sm_kettle_a01_01.usd.png")
+    m = simready.manifest(U)
+    assert m["package_root"] == "kettle_a01" and m["file_count"] == 3
+    f = simready.fetch(U)
+    assert f["ok"] and f["license"] == "CC-BY-4.0" and f["license_text"].startswith("Attribution") and f["revision"] == "abc123def4567"
+    assert simready.local(U) == f["local_usd"] and simready.catalog()[0]["package"] == "kettle_a01"
+
+
+def test_output_dir_avoids_system32(tmp_path, monkeypatch):
+    from simwright.tools import Toolbox
+    monkeypatch.setattr(config, "HOME", tmp_path / "home")
+    tb = Toolbox.__new__(Toolbox)
+    tb.root = pathlib.Path("/Windows/System32")
+    assert str(tb._out(".simwright/captures/f.png")).startswith(str(tmp_path / "home"))
+    tb.root = tmp_path
+    assert tb._out(".simwright/captures/f.png") == tmp_path / ".simwright/captures/f.png"
+    assert tb._out("/abs/x.png") == pathlib.Path("/abs/x.png")

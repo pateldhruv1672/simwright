@@ -73,7 +73,16 @@ def cmd_status(root):
           "runs": lab.Lab().runs(15), "jobs": [
               {k: v for k, v in j.items() if k not in ("tail",)} for j in lab.job_status()],
           "policies": lab.policies(), "skills": [{"name": s.name, "scope": s.scope} for s in skills.discover(root)],
-          "context_file": context.load_context(root)[0]})
+          "context_file": context.load_context(root)[0],
+          "simready": [{k: r.get(k) for k in ("url", "package", "dataset", "revision", "license", "local_usd", "fetched_at")} for r in _simready_catalog()]})
+
+
+def _simready_catalog():
+    try:
+        from . import simready
+        return simready.catalog()[-50:]
+    except Exception:
+        return []
 
 
 HELP = """Slash commands
@@ -85,6 +94,7 @@ HELP = """Slash commands
   /urdf <file>   /build [pkgs]   /mujoco <xml>   /gazebo <world>
   /isaac launch|status|scene|check|capture|record|assets <kw>
   /world <spec.json>
+  /simready search <query> [--limit=8 --max_size=0.5] | fetch <url> | place <url> [--on=/World/table --x= --y= --yaw= --prim=] | list
   /lab installs|tasks|train <task>|jobs|runs|play <task>|export <task> <ckpt>|policies
   /mode auto|step|ask        auto = run uninterrupted (ESC pauses), step = confirm each command
   /image <path>              attach a photo (e.g. of a room to match)
@@ -175,6 +185,32 @@ def dispatch(tb, c, rest):
         r = tb.world_compose(spec, pathlib.Path(a[0]).stem, apply="--no-apply" not in rest)
         print(r.pop("map"))
         return r
+    if c == "simready":
+        sub = a[0]
+        pos, kw, items, i = [], {}, list(rest[1:]), 0
+        while i < len(items):
+            x = items[i]
+            if x.startswith("--"):
+                k, eq, v = x[2:].partition("=")
+                if not eq and i + 1 < len(items) and not items[i + 1].startswith("--"):
+                    v, i = items[i + 1], i + 1
+                kw[k.replace("-", "_")] = v if (eq or v) else True
+            else:
+                pos.append(x)
+            i += 1
+        if sub == "search":
+            return tb.simready_search(" ".join(pos), int(kw.get("limit", 8)), float(kw.get("max_size", 0)),
+                                      float(kw.get("min_size", 0)), kw.get("dataset", ""))
+        if sub in ("fetch", "get"):
+            return tb.simready_fetch(pos[0])
+        if sub == "place":
+            import re as _re
+            stem = _re.sub(r"\W+", "_", pos[0].replace("\\", "/").rsplit("/", 1)[-1].rsplit(".", 1)[0])
+            return tb.simready_place(pos[0], kw.get("prim", "/World/SimReady/" + stem), float(kw.get("x", 0)), float(kw.get("y", 0)),
+                                     float(kw.get("yaw", 0)), kw.get("on", ""), kw.get("physics", "auto"), use_xy=("x" in kw or "y" in kw))
+        if sub in ("list", "catalog"):
+            return tb.simready_catalog()
+        raise ValueError("simready search|fetch|place|list")
     if c == "lab":
         sub = a[0]
         if sub == "installs":
@@ -240,7 +276,7 @@ def main(argv=None):
     sub.add_parser("mcp")
     p = sub.add_parser("serve"); p.add_argument("--port", type=int)
     p = sub.add_parser("chat"); p.add_argument("prompt", nargs="+"); p.add_argument("--mode", default=None)
-    for name in ("ros", "urdf", "build", "mujoco", "gazebo", "isaac", "world", "lab"):
+    for name in ("ros", "urdf", "build", "mujoco", "gazebo", "isaac", "world", "lab", "simready"):
         p = sub.add_parser(name); p.add_argument("rest", nargs=argparse.REMAINDER)
     a = ap.parse_args(argv)
     root = context.find_root(a.root)

@@ -27,3 +27,7 @@ isaac-sim-validator, physics-simulation, usd-articulation ...) are discovered fr
 ## Done means
 Physics check passes, capture is lit and framed on the robot, and the scene is saved (`omni.usd.get_context().save_as_stage(path)`)
 to a path recorded in SIMWRIGHT.md.
+
+## Captures
+- `simwright isaac capture <abs path>` waits until the PNG is fully written; when the terminal sits in an unwritable folder (C:\Windows\System32) captures go to ~/.simwright/captures.
+- Look at the frame after every build: placement bugs (overhangs, giant props, wrong facing) show up there first.

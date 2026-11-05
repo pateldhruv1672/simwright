@@ -27,3 +27,13 @@ when none match, a labeled box with a collider stands in (reported as `fallback_
 
 From a photo: describe the room's dimensions, door positions and furniture groups from the image into this spec, state your
 estimates, then compose. After building: `isaac_physics_check` and `isaac_capture` from a high oblique view.
+
+## Real assets from SimReady Central
+- `simwright simready search "<object>" --max_size 0.5` returns simulation-ready USD (physics, materials, metric scale) with its real size in meters; prefer it over hand-made boxes and over unscaled art assets.
+- `simwright simready place <url> --on /World/Kitchen/table --x 3.1 --y 2.2 --yaw 90` downloads the whole package at its pinned revision, fixes units and up axis and rests it on the support's top (or the floor). It reports `inside_support_xy`; false means it overhangs: move it.
+- Keep SimReady physics as authored (`--physics auto`); add colliders or a rigid body only for assets without them.
+- Note each asset's license (catalog: `simwright simready list`); NVIDIA's own set is CC-BY-4.0 and needs attribution.
+## Placement checks that caught real mistakes
+- Items on a table: every bbox inside the tabletop in x and y, no two footprints overlapping (5 mm tolerance), bottoms at top + 2-3 mm.
+- Appliances: no intersections with counters; check model heights (a 0.4 m "dishwasher" is a broken asset, drop it).
+- Long thin utensils point toward the diner; verify the long axis after rotation from the bbox, not from the yaw you asked for.

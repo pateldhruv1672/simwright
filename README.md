@@ -27,3 +27,15 @@ simwright
 ```
 
 Project context: `SIMWRIGHT.md` (also reads `DRIFT.md`, `CLAUDE.md`, `AGENTS.md`) at the workspace root, read before every step.
+
+## SimReady assets
+
+Simwright searches [SimReady Central](https://huggingface.co/spaces/nvidia/simready-central), NVIDIA's index of simulation-ready OpenUSD assets on Hugging Face, and imports them at their pinned revision:
+
+```powershell
+simwright simready search "electric kettle" --max_size 0.5
+simwright simready place <url> --on /World/Kitchen/countertop --x 2.4 --y 4.7
+simwright simready list      # cached packages with source revision and license
+```
+
+Packages are cached under `~/.simwright/simready/` with their license and validation reports. Set `HF_TOKEN` for gated contributor datasets.
