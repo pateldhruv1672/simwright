@@ -97,7 +97,7 @@ def search(query: str, limit: int = 10, max_size_m: float | None = None, min_siz
         if dm and min_size_m and max(dm) < min_size_m:
             continue
         hits.append(hit)
-    return {"ok": True, "query": query, "total": r.get("total"), "hits": hits}
+    return {"ok": True, "query": query, "total": r.get("total"), "offset": offset, "next_offset": offset + len(r.get("hits", [])) if r.get("hits") else None, "hits": hits}
 
 
 def manifest(url: str) -> dict:

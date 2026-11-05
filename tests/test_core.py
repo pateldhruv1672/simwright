@@ -1002,3 +1002,60 @@ def test_cli_simready_usage_and_capture_view_args():
     assert r["ok"] is False and "URL" in r["error"]
     assert _view_kw(["out.png", "--eye=1.5,1.1,1.5", "--target", "0.5,0.1,0.8"]) == {"eye": "1.5,1.1,1.5", "target": "0.5,0.1,0.8"}
     assert _view_kw(["out.png"]) == {}
+
+
+def test_isaac_exec_refuses_hugging_face_usd_urls():
+    """Regression (Nov 5): referencing HF 'blob' URLs inside Kit hung Isaac Sim. The guard runs before approval and Kit."""
+    from simwright.tools import _HF_USD
+    bad = 'ref.SetReferences(["https://huggingface.co/datasets/nvidia/simready-assets/blob/653d91e/table_x/simready_usd/sm_table.usd"])'
+    assert _HF_USD.findall(bad)
+    assert _HF_USD.findall("u = 'https://huggingface.co/datasets/ForgeCAD/simready-assets/resolve/0573053/microwave_oven/simready_usd/microwave_oven.usda'")
+    ok = 'root = "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Robots/Unitree/G1/g1.usd"'
+    assert not _HF_USD.findall(ok)
+    assert not _HF_USD.findall("p = 'C:/Users/Dhruv/.simwright/simready/x/sm_table.usd'")
+
+
+def test_panel_simready_library_endpoint(tmp_path, monkeypatch):
+    import threading, json, urllib.request, urllib.error
+    from http.server import ThreadingHTTPServer
+    from simwright import serve, simready
+    from types import SimpleNamespace
+    calls = []
+    def search(query, limit, offset):
+        calls.append((query, limit, offset))
+        return {"ok": True, "hits": [{"name": "kettle", "dataset": "nvidia/simready-assets"}], "next_offset": offset + 12}
+    monkeypatch.setattr(simready, "search", search)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), serve.make_handler(SimpleNamespace(), "test-token"))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{server.server_port}/assets/search"
+        def request(token, data):
+            req = urllib.request.Request(url, data=json.dumps(data).encode(), headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
+            return json.load(urllib.request.urlopen(req, timeout=5))
+        import pytest
+        with pytest.raises(urllib.error.HTTPError) as err:
+            request("wrong", {"query": "kettle"})
+        assert err.value.code == 401 and not calls
+        result = request("test-token", {"query": "kettle", "offset": 12})
+        assert result["ok"] and result["next_offset"] == 24
+        assert calls == [("kettle", 12, 12)]
+        with pytest.raises(urllib.error.HTTPError) as err:
+            request("test-token", {"query": " "})
+        assert err.value.code == 400
+    finally:
+        server.shutdown(); server.server_close()
+
+
+def test_backup_of_unsaved_stage_has_a_valid_windows_name(tmp_path, monkeypatch):
+    """Regression (Nov 5): physics check on an unsaved stage tried to create backups/anon:<id>:World1-..."""
+    import os, re
+    monkeypatch.setenv("HOME", str(tmp_path)); monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    kh, st = _helpers_with_stage()
+    try:
+        assert st.GetRootLayer().anonymous and ":" in st.GetRootLayer().identifier
+        r = kh._backup_stage()
+        name = os.path.basename(r["path"])
+        assert name.startswith("untitled-") and not re.search(r'[<>:"/\\|?*]', name), name
+        assert os.path.exists(r["path"]) and os.path.dirname(r["path"]) == str(tmp_path / ".simwright" / "backups")
+    finally:
+        kh._TEST_STAGE = None

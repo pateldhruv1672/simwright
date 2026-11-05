@@ -74,6 +74,15 @@ class SimwrightCopilotExtension(omni.ext.IExt):
                 with self._scroll:
                     self._log = ui.VStack(spacing=6, height=0)
                 self._approvals = ui.VStack(spacing=6, height=0)
+                with ui.CollapsableFrame("SimReady library", collapsed=True):
+                    with ui.VStack(spacing=5):
+                        with ui.HStack(height=26, spacing=5):
+                            self._asset_query = ui.StringField()
+                            ui.Button("Search", width=65, clicked_fn=lambda: self._start_asset_search(0))
+                        self._asset_status = ui.Label("Search the public catalog across publishers, not just downloaded assets.", word_wrap=True, height=30)
+                        with ui.ScrollingFrame(height=180):
+                            self._asset_rows = ui.VStack(spacing=6, height=0)
+                        self._asset_more = ui.Button("More results", height=24, enabled=False, clicked_fn=self._more_assets)
                 self._prompt = ui.StringField(height=64, multiline=True)
                 with ui.HStack(height=26, spacing=6):
                     ui.Button("Send", clicked_fn=self._on_send)
@@ -86,6 +95,50 @@ class SimwrightCopilotExtension(omni.ext.IExt):
         s = self._serve()
         if s:  # show the project's earlier conversation right away
             self._ensure_pump(f"http://127.0.0.1:{s['port']}", s["token"])
+
+    def _start_asset_search(self, offset=0):
+        asyncio.ensure_future(self._search_assets(offset))
+
+    def _more_assets(self):
+        if getattr(self, "_asset_next", None) is not None:
+            self._start_asset_search(self._asset_next)
+
+    async def _search_assets(self, offset):
+        ep = self._endpoint()
+        if not ep:
+            return
+        query = self._asset_query.model.get_value_as_string().strip()
+        if not query:
+            return
+        generation = getattr(self, "_asset_generation", 0) + 1
+        self._asset_generation = generation
+        self._asset_status.text = "Searching SimReady Central…"
+        self._asset_more.enabled = False
+        try:
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, lambda: _http("POST", ep[0] + "/assets/search", ep[1], {"query": query, "offset": offset}, timeout=300))
+            if generation != self._asset_generation or not self._window:
+                return
+            if not result.get("ok"):
+                raise RuntimeError(result.get("error", "search failed"))
+            self._asset_next = result.get("next_offset")
+            self._asset_more.enabled = self._asset_next is not None
+            hits = result.get("hits", [])
+            self._asset_status.text = f"{len(hits)} results at offset {offset}. Imports include package dependencies."
+            self._asset_rows.clear()
+            ui = self._ui
+            with self._asset_rows:
+                for hit in hits:
+                    with ui.VStack(spacing=2, height=0):
+                        ui.Label(hit.get("name", "Asset").replace("_", " "), word_wrap=True, height=26)
+                        dims = hit.get("dims_m")
+                        detail = hit.get("dataset", "") + (" · " + " × ".join(f"{v:.2f}" for v in dims) + " m" if dims else " · size unknown")
+                        ui.Label(detail, word_wrap=True, height=24)
+                        url = hit.get("url", "")
+                        ui.Button("Add to scene…", height=24, clicked_fn=lambda u=url: self._send("Use simready_place to add this asset to the current scene. Inspect the scene and choose a free, supported spot; preserve existing objects. Check physics and capture the result. Asset: " + u))
+        except Exception as e:
+            if generation == self._asset_generation and self._window:
+                self._asset_status.text = "Library unavailable: " + self._explain(e)
 
     def _on_reset(self):
         ep = self._endpoint()

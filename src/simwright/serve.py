@@ -168,7 +168,17 @@ def make_handler(state: State, token: str):
                 return
             n = int(self.headers.get("Content-Length") or 0)
             data = json.loads(self.rfile.read(n) or b"{}")
-            if self.path == "/ask":
+            if self.path == "/assets/search":
+                try:
+                    from . import simready
+                    query = str(data.get("query", "")).strip()
+                    if not query:
+                        return self._json(400, {"error": "enter a search term"})
+                    result = simready.search(query, limit=12, offset=max(0, int(data.get("offset", 0))))
+                    self._json(200, result)
+                except Exception as e:
+                    self._json(502, {"error": str(e)})
+            elif self.path == "/ask":
                 prompt = (data.get("prompt") or "").strip()
                 if not prompt:
                     return self._json(400, {"error": "empty prompt"})

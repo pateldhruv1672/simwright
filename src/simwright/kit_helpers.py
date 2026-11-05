@@ -17,7 +17,7 @@ _TEST_STAGE = None
 _ASSET_CACHE = globals().get("_ASSET_CACHE") or {}
 
 
-HELPERS_VERSION = "0.5.7"
+HELPERS_VERSION = "0.5.9"
 
 
 def _stage():
@@ -678,7 +678,10 @@ def _backup_stage(tag="physics-check"):
     """Export the root layer (with unsaved edits) next to Simwright's state before anything risky."""
     st = _stage()
     lay = st.GetRootLayer()
-    base = os.path.splitext(os.path.basename(lay.realPath or lay.identifier or "anon"))[0] or "anon"
+    # An unsaved stage's identifier is 'anon:<id>:World1.usd'; ':' is illegal in Windows paths (Nov 5 failure).
+    real = lay.realPath or ""
+    base = os.path.splitext(os.path.basename(real))[0] if real and not lay.anonymous else "untitled"
+    base = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", base).strip(" ._") or "untitled"
     d = os.path.join(os.path.expanduser("~"), ".simwright", "backups")
     os.makedirs(d, exist_ok=True)
     keep = sorted(f for f in os.listdir(d) if f.startswith(base + "-"))

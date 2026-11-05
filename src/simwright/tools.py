@@ -57,6 +57,8 @@ def crash_report(wait: float = 0.0, marker: pathlib.Path | None = None) -> dict 
         time.sleep(1)
 
 
+_HF_USD = re.compile(r"https?://huggingface\.co/datasets/[^\s'\"]+?\.usd[acz]?\b", re.I)
+
 class Toolbox:
     def __init__(self, root: pathlib.Path, runner: Runner | None = None):
         self.root = root
@@ -274,8 +276,15 @@ class Toolbox:
         self.kit = KitClient.from_config()
         return {"ok": bool(s.get("ready")), **{k: v for k, v in s.items() if k != "token"}}
 
-    @tool("Execute Python inside the running Isaac Sim (Kit). Top-level await allowed. Print what you need back. Always fill `why` with one plain sentence saying what the code changes (or 'read-only: ...'); the user approves from it.")
+    @tool("Execute Python inside the running Isaac Sim (Kit). Top-level await allowed. Print what you need back. Always fill `why` with one plain sentence saying what the code changes (or 'read-only: ...'); the user approves from it. Never reference Hugging Face asset URLs here: place SimReady assets with simready_place (or use simready_fetch's local_usd).")
     def isaac_exec(self, code: str, why: str = "", timeout: int = 120) -> dict:
+        remote = _HF_USD.findall(code)
+        if remote:   # Nov 5: Kit's file client read these on the main thread, failed, and Isaac Sim hung, then exited
+            return {"ok": False, "error": "refused before running: this code opens Hugging Face dataset URLs inside Isaac Sim ("
+                    + ", ".join(sorted(set(remote))[:3]) + "). 'blob' links are web pages, not USD, and even 'resolve' links skip the "
+                    "package's materials and physics files; Kit reads them on its main thread and hangs.",
+                    "fix": "Use simready_place(url, prim_path, x, y, yaw, on) for each asset (it downloads the whole package at the pinned "
+                           "revision and references the local file), or simready_fetch(url) and use the returned local_usd path in your code."}
         lines = [l for l in code.strip().splitlines() if l.strip() and not re.match(r"\s*(import|from)\s", l)]
         head = (lines[0] if lines else (code.strip().splitlines() or [""])[0])[:100]
         label = (why.strip() or f"python ({len(code.splitlines())} lines): {head}")[:200]
@@ -553,9 +562,9 @@ class Toolbox:
     @tool("Search SimReady Central for simulation-ready USD assets (physics, materials, real-world scale). Returns name, "
           "url, dataset, revision, real size in meters [x,y,z] and a thumbnail. Optional max_size_m/min_size_m filter "
           "the largest side; dataset restricts to one HF dataset, e.g. nvidia/simready-assets.")
-    def simready_search(self, query: str, limit: int = 8, max_size_m: float = 0.0, min_size_m: float = 0.0, dataset: str = "") -> dict:
+    def simready_search(self, query: str, limit: int = 8, max_size_m: float = 0.0, min_size_m: float = 0.0, dataset: str = "", offset: int = 0) -> dict:
         from . import simready
-        return simready.search(query, limit, max_size_m or None, min_size_m or None, dataset)
+        return simready.search(query, limit, max_size_m or None, min_size_m or None, dataset, offset)
 
     @tool("Download a SimReady asset's whole package (USD, physics sidecar, materials, license, validation reports) at "
           "the revision the index pinned, into the local cache. Returns local_usd and the license.")
