@@ -24,3 +24,6 @@ Report the root cause with evidence (the exact endpoint/QoS lines), fix it in th
 ## Isaac Sim as the data source
 - Isaac Sim publishes ROS 2 through the `isaacsim.ros2.bridge` extension and OmniGraph nodes (clock, joint states, TF, cameras, lidar). Look up the node types with `isaac_docs` (kind=extensions / code) before building a graph.
 - On Windows + WSL, ROS 2 in WSL reaches Isaac Sim on the host only with mirrored networking (or a matching ROS_DOMAIN_ID and a DDS profile); check `/clock` first, then `ros2_graph`.
+
+## Isaac Sim topics missing in WSL
+- Run `simwright ros bridge check`; it lists what WSL sees, the rates and topics with lost messages. Lost messages on big topics = IP fragmentation (profile maxMessageSize). Nothing at all = discovery (profile, domain, firewall, Isaac Sim not launched with --ros).
