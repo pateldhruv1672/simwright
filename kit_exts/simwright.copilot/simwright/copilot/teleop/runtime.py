@@ -126,7 +126,7 @@ class G1Teleop:
         omni.timeline.get_timeline_interface().stop()
         self._restore()
         if self.rx:
-            self.rx.close()
+            self.rx.close(); self.rx = None
         self.view = self.art = None
         return {"ok": True, "stopped": True, "restored": "world pin and physics rate back to the scene's values"}
 
@@ -297,22 +297,58 @@ class G1Teleop:
                 "manual": self.manual, "fallen": self.fallen, **self.info, "errors": self.errors}
 
 
-def start(**kw):
-    global _SESSION
-    if _SESSION is not None:
+def _registry():
+    """Sessions survive module reloads (package upgrades); keep them on `sys` so a new module version can stop old ones."""
+    import sys
+    if not hasattr(sys, "_simwright_teleop_sessions"):
+        sys._simwright_teleop_sessions = []
+    return sys._simwright_teleop_sessions
+
+
+def _stop_all():
+    """Stop every teleop session, including ones created by older versions of this module."""
+    import gc
+    seen, stopped = set(), 0
+    cands = list(_registry())
+    try:
+        cands += [o for o in gc.get_objects() if type(o).__name__ == "G1Teleop"]
+    except Exception:
+        pass
+    for o in cands:
+        if id(o) in seen:
+            continue
+        seen.add(id(o))
         try:
-            _SESSION.stop()
+            o.sub = None
+            if getattr(o, "upd", None) is not None:
+                try:
+                    o.upd.unsubscribe()
+                except Exception:
+                    pass
+                o.upd = None
+            if getattr(o, "rx", None) is not None:
+                o.rx.close(); o.rx = None
+            o._restore()
+            stopped += 1
         except Exception:
             pass
+    _registry().clear()
+    return stopped
+
+
+def start(**kw):
+    global _SESSION
+    _stop_all()
     _SESSION = G1Teleop(**kw)
+    _registry().append(_SESSION)
     return _SESSION.start()
 
 
 def stop():
     global _SESSION
-    if _SESSION is None:
-        return {"ok": True, "note": "not running"}
-    r = _SESSION.stop(); _SESSION = None
+    r = _SESSION.stop() if _SESSION is not None else {"ok": True, "note": "not running"}
+    r["also_stopped"] = _stop_all()
+    _SESSION = None
     return r
 
 

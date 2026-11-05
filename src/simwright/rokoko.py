@@ -97,7 +97,11 @@ class Receiver:
         self.port, self.actor_name = port, actor
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
-        self.sock.bind((host, port))
+        try:
+            self.sock.bind((host, port))
+        except OSError as e:
+            self.sock.close()
+            raise OSError(f"UDP port {port} is already in use (another receiver, a Rokoko plugin, or an old teleop session): {e}") from e
         self.sock.setblocking(False)
         self.latest = None
         self.latest_t = 0.0
