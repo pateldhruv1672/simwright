@@ -738,3 +738,81 @@ def test_physics_repair_skips_mimic_followers(tmp_path):
         assert not any(c["prim"].endswith("follower_finger_joint") for c in r["details"])
     finally:
         kh._TEST_STAGE = None
+
+
+
+def test_preflight_ignores_links_inside_one_articulation(tmp_path):
+    from pxr import UsdPhysics, UsdGeom
+    kh, st = _helpers_with_stage()
+    try:
+        UsdPhysics.Scene.Define(st, "/World/PhysicsScene")
+        g = UsdGeom.Xform.Define(st, "/World/G1/Geometry").GetPrim(); UsdPhysics.ArticulationRootAPI.Apply(g)
+        for p in ("/World/G1/Geometry/pelvis", "/World/G1/Geometry/pelvis/hip", "/World/loose", "/World/loose/inner"):
+            UsdPhysics.RigidBodyAPI.Apply(UsdGeom.Xform.Define(st, p).GetPrim())
+        bodies = [i["body"] for i in kh.physics_preflight()["issues"] if "nested inside rigid body" in i["issue"]]
+        assert bodies == ["/World/loose/inner"]
+    finally:
+        kh._TEST_STAGE = None
+
+
+
+def _standin_docs_server(port):
+    """A local server with NVIDIA's Isaac Sim MCP tool names and argument shapes."""
+    import threading, time as _t, uvicorn
+    try:
+        from mcp.server.mcpserver import MCPServer as _S
+    except ImportError:
+        from mcp.server.fastmcp import FastMCP as _S
+    m = _S("isaac-sim-docs-standin")
+
+    @m.tool()
+    def search_isaac_sim_code_examples(request: str, top_k: int = 5) -> str:
+        return f"example for: {request} -> from isaacsim.core.api import World"
+
+    @m.tool()
+    def get_isaac_sim_extension_details(extension_ids: list[str]) -> str:
+        return "details: " + ",".join(extension_ids)
+
+    @m.tool()
+    def get_isaac_sim_instructions() -> str:
+        return "use isaacsim.* namespaces"
+    srv = uvicorn.Server(uvicorn.Config(m.streamable_http_app(), host="127.0.0.1", port=port, log_level="error"))
+    th = threading.Thread(target=srv.run, daemon=True); th.start()
+    for _ in range(100):
+        if srv.started:
+            break
+        _t.sleep(0.05)
+    return srv
+
+
+def test_isaac_docs_client_against_standin():
+    import socket
+    from simwright import docs
+    s = socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
+    srv = _standin_docs_server(port)
+    try:
+        ep = f"http://127.0.0.1:{port}/mcp"
+        st = docs.status(ep)
+        assert st["ok"] and "search_isaac_sim_code_examples" in st["tools"], st
+        r = docs.search("spawn a franka and step physics", "code", ep)
+        assert r["ok"] and "spawn a franka" in r["result"], r
+        r = docs.search("isaacsim.sensors.camera, isaacsim.core.api", "extension", ep)
+        assert "isaacsim.sensors.camera,isaacsim.core.api" in r["result"], r
+        assert "isaacsim" in docs.search("", "instructions", ep)["result"]
+        bad = docs.search("x", "code", "http://127.0.0.1:1/mcp")
+        assert not bad["ok"] and "simwright docs setup" in bad["fix"]
+    finally:
+        srv.should_exit = True
+
+
+
+def test_connect_isaac_docs_entries(tmp_path):
+    import json as _j
+    from simwright.connect import connect_docs
+    r = connect_docs("cursor", tmp_path, home=tmp_path, url="http://localhost:9904/mcp")
+    assert _j.loads((tmp_path / ".cursor" / "mcp.json").read_text())["mcpServers"]["isaac-sim-mcp"]["url"] == "http://localhost:9904/mcp"
+    connect_docs("codex", tmp_path, home=tmp_path, url="http://localhost:9904/mcp")
+    connect_docs("codex", tmp_path, home=tmp_path, url="http://localhost:9904/mcp")
+    toml = (tmp_path / ".codex" / "config.toml").read_text()
+    assert toml.count("[mcp_servers.isaac-sim-mcp]") == 1
+    assert "--transport http" in connect_docs("claude", tmp_path, print_only=True, url="http://x/mcp")["run_this"]

@@ -25,3 +25,8 @@ description: Train, monitor, evaluate, export, register and deploy reinforcement
 
 ## Continuing work
 - Read `project_memory` first: earlier training runs, checkpoints and decisions are in `.simwright/notes.md` and the archived conversations. Record each registered policy and its run directory with `project_note`.
+
+## Running a trained policy inside Isaac Sim (NVIDIA's workflow)
+- Follow NVIDIA's policy-deployment workflow: the `isaac-sim-robot-navigation` skill's `references/policy-deployment.md` (in the Isaac Sim install's skills folder; `skill_list` shows it) and "Deploying policies in Isaac Sim". It covers finding and exporting artifacts, reusing `env.yaml` directly, launch commands, expected output, failure checks and teardown.
+- Look up `RobotPolicyRunner`, `PolicyArtifact` and `IO_descriptors.yaml` with `isaac_docs` before writing code; Unitree H2 is NVIDIA's worked example.
+- Drive gains and the physics rate in the scene must match the training config (Isaac Lab sets actuator gains at runtime; a standalone scene uses its USD drives). Record the policy, its run directory, task and gains with `project_note`.

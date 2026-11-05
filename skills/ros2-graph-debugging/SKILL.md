@@ -20,3 +20,7 @@ Start from the symptom, then walk the chain publisher -> topic -> subscriber -> 
    (`networkingMode=mirrored` in `%USERPROFILE%\.wslconfig`) so DDS discovery reaches Isaac Sim on Windows; Docker containers need `--network host`.
 
 Report the root cause with evidence (the exact endpoint/QoS lines), fix it in the owning file, rebuild if needed, re-run `ros2_trace`.
+
+## Isaac Sim as the data source
+- Isaac Sim publishes ROS 2 through the `isaacsim.ros2.bridge` extension and OmniGraph nodes (clock, joint states, TF, cameras, lidar). Look up the node types with `isaac_docs` (kind=extensions / code) before building a graph.
+- On Windows + WSL, ROS 2 in WSL reaches Isaac Sim on the host only with mirrored networking (or a matching ROS_DOMAIN_ID and a DDS profile); check `/clock` first, then `ros2_graph`.

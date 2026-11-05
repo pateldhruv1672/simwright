@@ -17,7 +17,7 @@ _TEST_STAGE = None
 _ASSET_CACHE = globals().get("_ASSET_CACHE") or {}
 
 
-HELPERS_VERSION = "0.3.3"
+HELPERS_VERSION = "0.3.4"
 
 
 def _stage():
@@ -96,7 +96,7 @@ def _health_brief():
 def _rigid_paths(limit=300):
     out = []
     for p in _stage().Traverse():
-        if p.HasAPI(UsdPhysics.RigidBodyAPI):
+        if p.HasAPI(UsdPhysics.RigidBodyAPI) and _attr(p, "physics:rigidBodyEnabled", True):
             out.append(str(p.GetPath()))
             if len(out) >= limit:
                 break
@@ -105,6 +105,9 @@ def _rigid_paths(limit=300):
 
 def _pose(path):
     try:
+        import omni.timeline
+        if not omni.timeline.get_timeline_interface().is_playing():
+            raise RuntimeError("PhysX has not parsed the stage yet: use the USD pose")
         from omni.physx import get_physx_interface
         r = get_physx_interface().get_rigidbody_transformation(path)
         if r and r.get("ret_val"):
@@ -263,9 +266,11 @@ def physics_preflight(max_prims=60000):
                                       "or use the combined robot+gripper asset"})
     # rigid bodies nested in rigid bodies without resetting the transform stack
     bpaths = sorted(str(b.GetPath()) for b in bodies)
+    art_scopes = [scope(r) for r in roots]
+    in_art = lambda q: any(q == s_ or q.startswith(s_ + "/") for s_ in art_scopes)
     for i, a in enumerate(bpaths):
         for b in bpaths[i + 1:i + 40]:
-            if b.startswith(a + "/"):
+            if b.startswith(a + "/") and not (in_art(a) and in_art(b)):  # links nested inside one articulation are normal
                 bp = st.GetPrimAtPath(b)
                 if not UsdGeom.Xformable(bp).GetResetXformStack():
                     issues.append({"severity": "warning", "body": b, "issue": f"rigid body nested inside rigid body {a}",
@@ -396,6 +401,11 @@ def physics_repair(scope="/World", apply=False, mass_floor=0.02, solver=(32, 4),
     return {"ok": True, "applied": bool(apply), "changes": len(changes), "summary": summary, "details": changes[:80],
             "truncated": truncated, "edit_target": st.GetEditTarget().GetLayer().identifier,
             "note": "overrides in the edit target; referenced robot assets unchanged" + ("" if apply else "; nothing changed yet (preview)")}
+
+
+def backup_stage(tag="manual"):
+    """Public alias: `from helpers import *` skips underscore names."""
+    return _backup_stage(tag)
 
 
 def _marker_path():

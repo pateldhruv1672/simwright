@@ -4,6 +4,7 @@ import difflib, fnmatch, inspect, json, os, pathlib, re, time, typing
 from . import config, colcon, lab as labmod, ros2, sims, skills, urdf, world
 from .isaac import KitClient, KitError, find_isaac_sim, frames_to_mp4, launch as kit_launch
 from .memory import ProjectMemory, Session
+from . import docs as docsmod
 from .targets import Runner, Target
 
 TOOLS: dict[str, str] = {}
@@ -312,6 +313,37 @@ class Toolbox:
     def isaac_capture(self, path: str = ".simwright/captures/frame.png") -> dict:
         p = str(self._out(path)).replace("\\", "/")
         return self.kit.call(f"await capture({json.dumps(p)})", timeout=180)
+
+    # ---------- NVIDIA Isaac Sim docs (kit-usd-agents MCP server) ----------
+    @tool("Look up NVIDIA's Isaac Sim knowledge base (the official Isaac Sim MCP server) before writing Isaac Sim code: "
+          "kind=code (code examples by description), extensions (find the extension for a job), extension (details for "
+          "comma-separated extension ids), settings (Kit/Isaac settings), instructions (development guidance). Use it to get "
+          "real module names and APIs (e.g. RobotPolicyRunner, PolicyArtifact, ROS 2 bridge nodes) instead of guessing.")
+    def isaac_docs(self, query: str = "", kind: str = "code") -> dict:
+        return docsmod.search(query, kind)
+
+    @tool("Build and start NVIDIA's Isaac Sim docs MCP server in Docker (http://localhost:9904/mcp). Needs Docker, Git LFS and "
+          "an NVIDIA API key saved with `simwright docs key`. Shows every command before it runs.")
+    def isaac_docs_setup(self) -> dict:
+        envp = docsmod.env_file()
+        if not envp.exists() or "NVIDIA_API_KEY=" not in envp.read_text():
+            return {"ok": False, "error": "no NVIDIA API key yet",
+                    "fix": "create one at https://build.nvidia.com/settings/api-keys, then run `simwright docs key` in a terminal and paste it"}
+        win = os.name == "nt"
+        repo = str(config.state_file("kit-usd-agents"))
+        steps = []
+        for cmd, why in docsmod.setup_commands(win, repo, str(envp)):
+            r = self.runner.run(cmd, "host", description=why, timeout=2400)
+            steps.append({"step": why, "exit": r.exit, "tail": (r.out or "")[-600:]})
+            if r.skipped or not r.ok:
+                return {"ok": False, "failed_at": why, "steps": steps}
+        import time as _t
+        for _ in range(30):
+            st = docsmod.status()
+            if st.get("ok"):
+                return {"ok": True, "steps": steps, "status": st}
+            _t.sleep(4)
+        return {"ok": False, "steps": steps, "status": docsmod.status(), "hint": "container started but /mcp is not answering yet: docker logs isaacsim-mcp"}
 
     # ---------- project memory (shared by the panel, the terminal copilot and MCP clients) ----------
     @tool("Read this project's memory: notes (decisions, saved stages, conventions, next steps), what Simwright changed "

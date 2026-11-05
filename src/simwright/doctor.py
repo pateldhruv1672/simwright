@@ -91,4 +91,11 @@ def run_doctor(runner: Runner | None = None, deep: bool = False) -> dict:
     bridge = pathlib.Path.home() / ".mana-terminal"
     add("Mana Bridge", bridge.exists(), "paired" if (bridge / "config.json").exists() else ("installed" if bridge.exists() else "not installed"),
         "open Mana Bridge in Mana and run its Windows install line, then type `mana` in your robot workspace")
+    try:
+        from . import docs as _docs
+        ds_ = _docs.status()
+        add("Isaac Sim docs (NVIDIA MCP)", ds_["ok"], f"{ds_['endpoint']}: {len(ds_.get('tools', []))} tools" if ds_["ok"] else "not running (optional)",
+            "optional: NVIDIA's Isaac Sim knowledge server. simwright docs key, then simwright docs setup")
+    except Exception:
+        pass
     return {"ok": all(c["ok"] for c in checks if c["check"] in ("NVIDIA GPU",)), "checks": checks}

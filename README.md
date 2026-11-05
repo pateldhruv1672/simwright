@@ -233,6 +233,19 @@ Every subcommand prints JSON, so scripts and agents can use the CLI directly.
 
 **SimReady assets.** Search and package manifests come from the public SimReady Central API; files download straight from the contributor's Hugging Face dataset at the indexed revision into `~/.simwright/simready/<org>__<dataset>/<revision>/`. Set `HF_TOKEN` for gated datasets. NVIDIA's own assets are CC-BY-4.0: attribute them when you publish.
 
+## NVIDIA Isaac Sim docs server
+
+NVIDIA ships an [Isaac Sim MCP server](https://docs.isaacsim.omniverse.nvidia.com/6.0.0/development_tools/isaac_sim_mcp.html): a knowledge base of Isaac Sim extensions, code examples, settings and developer instructions. Simwright uses it through its `isaac_docs` tool, so the agent looks up real APIs before writing Isaac Sim code. It runs in Docker and needs a free NVIDIA API key.
+
+```powershell
+simwright docs key          # paste your key from build.nvidia.com/settings/api-keys (hidden input)
+simwright docs setup        # builds and starts NVIDIA's container on http://localhost:9904/mcp
+simwright docs search "publish joint states to ROS 2" --kind code
+simwright connect claude --with-isaac-docs   # also register NVIDIA's server in Claude Code
+```
+
+It is optional: everything else works without it, and `simwright doctor` shows whether it is up.
+
 ## Project memory
 
 Each workspace keeps its own memory in `.simwright/`, shared by the Isaac Sim panel, the terminal copilot and MCP clients:

@@ -27,14 +27,14 @@ def _backup(p: pathlib.Path):
         shutil.copyfile(p, p.with_name(p.name + ".bak"))
 
 
-def _merge_json(p: pathlib.Path, key: str, entry: dict) -> dict:
+def _merge_json(p: pathlib.Path, key: str, entry: dict, name: str = "simwright") -> dict:
     data = {}
     if p.exists():
         txt = p.read_text(encoding="utf-8").strip()
         if txt:
             data = json.loads(txt)  # refuse to clobber a file we cannot parse
     _backup(p)
-    data.setdefault(key, {})["simwright"] = entry
+    data.setdefault(key, {})[name] = entry
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     return {"ok": True, "file": str(p)}
@@ -114,3 +114,39 @@ def connect(client: str, root: pathlib.Path, read_only: bool = False, print_only
                 "then": "In ChatGPT (web): Settings > Apps > Advanced > Developer mode, then Create (newer UI: Customize > Plugins > Add > "
                         "Create MCP App). Paste the printed URL, Authentication: No authentication. ChatGPT asks before write actions."}
     raise ValueError(f"unknown client {client!r}; choose one of {', '.join(CLIENTS)}")
+
+
+
+def connect_docs(client: str, root: pathlib.Path, print_only: bool = False, home: pathlib.Path | None = None, url: str | None = None) -> dict:
+    """Register NVIDIA's Isaac Sim docs MCP server (HTTP) next to Simwright in an assistant."""
+    from . import docs
+    home = home or pathlib.Path.home()
+    url = url or docs.url()
+    name = "isaac-sim-mcp"
+    if client == "claude":
+        line = ["claude", "mcp", "add", "--transport", "http", "--scope", "user", name, url]
+        if print_only or not shutil.which("claude"):
+            return {"ok": True, "run_this": subprocess.list2cmdline(line)}
+        subprocess.run(["claude", "mcp", "remove", "--scope", "user", name], capture_output=True, text=True)
+        r = subprocess.run(line, capture_output=True, text=True)
+        return {"ok": r.returncode == 0, "ran": subprocess.list2cmdline(line), "output": (r.stdout + r.stderr).strip()[-400:]}
+    if client == "codex":
+        p = home / ".codex" / "config.toml"
+        block = f"[mcp_servers.{name}]\nurl = {_toml_str(url)}\n"
+        if print_only:
+            return {"ok": True, "file": str(p), "add_this": block}
+        old = p.read_text(encoding="utf-8") if p.exists() else ""
+        if f"[mcp_servers.{name}]" in old:
+            return {"ok": True, "file": str(p), "note": "already registered"}
+        _backup(p); p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(old.rstrip() + ("\n\n" if old.strip() else "") + block, encoding="utf-8")
+        return {"ok": True, "file": str(p)}
+    if client == "cursor":
+        p = home / ".cursor" / "mcp.json"
+        e = {"url": url}
+        return {"ok": True, "file": str(p), "add_this": {"mcpServers": {name: e}}} if print_only else _merge_json(p, "mcpServers", e, name)
+    if client == "vscode":
+        p = root / ".vscode" / "mcp.json"
+        e = {"type": "http", "url": url}
+        return {"ok": True, "file": str(p), "add_this": {"servers": {name: e}}} if print_only else _merge_json(p, "servers", e, name)
+    return {"ok": False, "note": f"{client}: NVIDIA's docs server is HTTP on localhost; Simwright already proxies it through its isaac_docs tool."}

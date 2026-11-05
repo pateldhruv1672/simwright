@@ -299,6 +299,9 @@ def main(argv=None):
     p = sub.add_parser("connect", help="register Simwright with claude | codex | cursor | vscode | claude-desktop | chatgpt")
     p.add_argument("client", choices=["claude", "codex", "cursor", "vscode", "claude-desktop", "chatgpt"])
     p.add_argument("--read-only", action="store_true"); p.add_argument("--print", dest="print_only", action="store_true")
+    p.add_argument("--with-isaac-docs", action="store_true", help="also register NVIDIA's Isaac Sim docs MCP server")
+    p = sub.add_parser("docs", help="NVIDIA's Isaac Sim docs MCP server: key | status | setup | search <query> [--kind code|extensions|extension|settings|instructions]")
+    p.add_argument("action", choices=["key", "status", "setup", "search"]); p.add_argument("query", nargs="*"); p.add_argument("--kind", default="code")
     p = sub.add_parser("serve"); p.add_argument("--port", type=int)
     p = sub.add_parser("chat"); p.add_argument("prompt", nargs="+"); p.add_argument("--mode", default=None)
     for name in ("ros", "urdf", "build", "mujoco", "gazebo", "isaac", "world", "lab", "simready"):
@@ -332,8 +335,30 @@ def main(argv=None):
             + (["--new-token"] if a.new_token else []) + ["--port", str(a.port), "--host", a.host]
         return mcp_main(["--root", str(root), *extra])
     if a.cmd == "connect":
-        from .connect import connect
-        return _out(connect(a.client, root, a.read_only, a.print_only))
+        from .connect import connect, connect_docs
+        r = connect(a.client, root, a.read_only, a.print_only)
+        if a.with_isaac_docs:
+            r = {"simwright": r, "isaac_docs": connect_docs(a.client, root, a.print_only)}
+        return _out(r)
+    if a.cmd == "docs":
+        from . import docs as docsmod
+        if a.action == "key":
+            import getpass
+            key = os.environ.get("NVIDIA_API_KEY") or getpass.getpass("NVIDIA API key (nvapi-..., input hidden): ").strip()
+            if not key.startswith("nvapi-"):
+                return print("That does not look like an NVIDIA API key (nvapi-...). Nothing saved.")
+            f = docsmod.env_file(); f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(f"NVIDIA_API_KEY={key}\n", encoding="utf-8")
+            try:
+                os.chmod(f, 0o600)
+            except OSError:
+                pass
+            return print(f"Saved to {f} (used only by the docs container). Next: simwright docs setup")
+        if a.action == "status":
+            return _out(docsmod.status())
+        if a.action == "search":
+            return _out(docsmod.search(" ".join(a.query), a.kind))
+        return _out(_tb(root).isaac_docs_setup())
     if a.cmd == "serve":
         from .serve import serve
         return serve(root, a.port)

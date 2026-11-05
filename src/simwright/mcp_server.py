@@ -12,13 +12,14 @@ import argparse, inspect, json, os, pathlib, re, secrets, shutil, subprocess, sy
 
 READ_ONLY = {"read_file", "list_dir", "search_files", "ros2_graph", "ros2_trace", "urdf_validate", "colcon_diagnose",
              "isaac_status", "isaac_scene", "isaac_asset_search", "simready_search", "simready_catalog", "lab_tasks",
-             "lab_jobs", "lab_runs", "policy_list", "skill_list", "skill_read", "doctor", "project_memory", "isaac_placement_audit"}  # isaac_physics_repair previews by default but can write
+             "lab_jobs", "lab_runs", "policy_list", "skill_list", "skill_read", "doctor", "project_memory", "isaac_placement_audit", "isaac_docs"}  # isaac_physics_repair previews by default but can write
 DESTRUCTIVE = {"run_command", "write_file", "edit_file", "isaac_exec", "lab_stop", "policy_deploy"}
 OPEN_WORLD = {"run_command", "simready_search", "simready_fetch", "simready_place"}
 
 INSTRUCTIONS = """Simwright drives robot simulation on the user's machine: Isaac Sim, Isaac Lab, ROS 2, Gazebo, MuJoCo.
 Before acting, read project_memory (notes, earlier work) and the project context (read_file SIMWRIGHT.md), and the matching skill.
 Record decisions and saved stage paths with project_note.
+Before writing Isaac Sim code, look up the real API with isaac_docs (NVIDIA's Isaac Sim knowledge server).
 Place objects with isaac_place / simready_place (surface ray cast), mount on links with isaac_mount, verify with isaac_placement_audit.
 Never invent paths, topics, frames or prim paths: list, search or inspect first (ros2_graph, isaac_scene).
 Close the loop: after changing a sim run the check (isaac_physics_check, isaac_capture, lab_jobs, ros2_trace) and read it.

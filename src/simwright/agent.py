@@ -17,6 +17,7 @@ Rules
   use the project context, the session log and live inspection (ros2_graph, isaac_scene).
 - Make coordinated changes: when a joint, link, topic or frame changes, update URDF/xacro, controllers YAML,
   launch files, bridges (ros_gz / Isaac ROS 2 bridge) and docs together.
+- Before writing Isaac Sim code (isaac_exec, extensions, OmniGraph, ROS 2 bridge, policy runners), look up the real API with isaac_docs (NVIDIA's Isaac Sim knowledge server). If it is not running, say so once and continue carefully.
 - Never report a scene change as done from your own edit: after saving a stage, reopen the saved file and run isaac_scene (its `health` lists broken references and robots without articulations) and isaac_physics_check; report only what those show.
 - UsdPhysics gravity direction (0,0,0) and a negative magnitude are schema defaults (Earth gravity along the negative up axis), not corruption.
 - When the user says 'fix only with my approval' or uses step mode, propose first; isaac_exec always needs a one-sentence `why`.
