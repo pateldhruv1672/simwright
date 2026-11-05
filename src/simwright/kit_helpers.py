@@ -12,7 +12,7 @@ except ImportError:  # imported outside Kit (tests): definitions only
 _ASSET_CACHE = globals().get("_ASSET_CACHE") or {}
 
 
-HELPERS_VERSION = "0.1.2"
+HELPERS_VERSION = "0.1.4"
 
 
 def _stage():
@@ -297,12 +297,13 @@ def place_usd(path, url, x=None, y=None, yaw_deg=0.0, z=None, on=None, physics="
     x, y, z = float(x or 0.0), float(y or 0.0), float(z or 0.0)
     mn, mx = b.GetMin(), b.GetMax()
     t_op.Set(Gf.Vec3d(x / smpu - (mn[0] + mx[0]) / 2, y / smpu - (mn[1] + mx[1]) / 2, z / smpu - mn[2]))
-    has_body = any(p.HasAPI(UsdPhysics.RigidBodyAPI) or p.HasAPI(UsdPhysics.ArticulationRootAPI) for p in Usd.PrimRange(pr))
-    has_col = any(p.HasAPI(UsdPhysics.CollisionAPI) for p in Usd.PrimRange(pr))
+    every = list(Usd.PrimRange(pr, Usd.TraverseInstanceProxies(Usd.PrimAllPrimsPredicate)))  # SimReady instances its meshes
+    has_body = any(p.HasAPI(UsdPhysics.RigidBodyAPI) or p.HasAPI(UsdPhysics.ArticulationRootAPI) for p in every)
+    has_col = any(p.HasAPI(UsdPhysics.CollisionAPI) for p in every)
     added = ""
     if physics in ("static", "dynamic") or (physics == "auto" and not has_col):
         approx = "convexHull" if physics == "dynamic" else "convexDecomposition"
-        for p in Usd.PrimRange(pr):
+        for p in Usd.PrimRange(pr):  # instance proxies are read-only; only author on real prims
             if p.IsA(UsdGeom.Mesh) and not p.HasAPI(UsdPhysics.CollisionAPI):
                 UsdPhysics.CollisionAPI.Apply(p)
                 UsdPhysics.MeshCollisionAPI.Apply(p).CreateApproximationAttr(approx)
