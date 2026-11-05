@@ -19,10 +19,51 @@ class State:
         self.lock = threading.Lock()
         self.queue: list[str] = []
         self.cancel = threading.Event()
+        self.log_file = self.root / ".simwright" / "panel_events.jsonl"
+        self._load_events()
+
+    def _load_events(self, keep: int = 400):
+        try:
+            lines = self.log_file.read_text(encoding="utf-8").splitlines()[-keep:]
+        except Exception:
+            return
+        for l in lines:
+            try:
+                ev = json.loads(l)
+            except Exception:
+                continue
+            ev["n"] = len(self.events)
+            ev["restored"] = True
+            self.events.append(ev)
 
     def emit(self, ev):
         with self.lock:
-            self.events.append({"n": len(self.events), "t": time.time(), **ev})
+            rec = {"n": len(self.events), "t": time.time(), **ev}
+            self.events.append(rec)
+        if ev.get("type") in ("user", "text", "tool", "command", "error", "reset", "queued", "stopping"):
+            try:
+                self.log_file.parent.mkdir(exist_ok=True)
+                with self.log_file.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps({k: v for k, v in rec.items() if k not in ("n", "restored")}, default=str) + "\n")
+                if self.log_file.stat().st_size > 4_000_000:  # keep the file small
+                    lines = self.log_file.read_text(encoding="utf-8").splitlines()[-2000:]
+                    self.log_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            except Exception:
+                pass
+
+    def reset(self) -> dict:
+        if self.busy:
+            return {"ok": False, "error": "busy: stop the current request first"}
+        from .agent import Agent
+        try:
+            if self.agent is None:
+                self.agent = Agent(self.root, self.tb, emit=self.emit)
+            r = self.agent.reset()
+        except Exception as e:
+            r = {"archived": bool(self.tb.memory.archive()), "summary": "", "error": str(e)}
+        self.emit({"type": "reset", "text": "New chat. The last one was summarized into the project notes." if r.get("summary")
+                   else "New chat.", "summary": r.get("summary", "")})
+        return {"ok": True, **r}
 
     def drain_approver(self):
         while self.approver.events:
@@ -75,6 +116,9 @@ class State:
             if self.agent is None:
                 self.agent = Agent(self.root, self.tb, emit=self.emit)
             self.agent.cancel = self.cancel
+            if getattr(self.agent, "restored", 0) and not getattr(self, "_told_restore", False):
+                self._told_restore = True
+                self.emit({"type": "info", "text": f"Continuing this project's conversation ({self.agent.restored} earlier messages, plus project notes)."})
             self.agent.turn(prompt)
         except Exception as e:
             self.emit({"type": "error", "text": f"{type(e).__name__}: {e}"})
@@ -112,6 +156,8 @@ def make_handler(state: State, token: str):
                     evs = state.events[since:]
                 self._json(200, {"events": evs, "busy": state.busy, "queued": len(state.queue), "pending": [
                     {k: v for k, v in p.items() if k != "event"} for p in state.approver.pending.values()]})
+            elif self.path.startswith("/history"):
+                self._json(200, {"ok": True, "notes": state.tb.memory.notes(), "conversations": state.tb.memory.history(20)})
             elif self.path.startswith("/status"):
                 self._json(200, {"ok": True, "root": str(state.root), "busy": state.busy, "queued": len(state.queue), "mode": state.approver.mode})
             else:
@@ -129,6 +175,8 @@ def make_handler(state: State, token: str):
                 self._json(200, state.submit(prompt))
             elif self.path == "/stop":
                 self._json(200, state.stop())
+            elif self.path == "/reset":
+                self._json(200, state.reset())
             elif self.path == "/approve":
                 self._json(200, {"ok": state.approver.answer(data.get("id", ""), data.get("decision", "skip"))})
             elif self.path == "/mode":

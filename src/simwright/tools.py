@@ -3,7 +3,7 @@ from __future__ import annotations
 import difflib, fnmatch, inspect, json, os, pathlib, re, time, typing
 from . import config, colcon, lab as labmod, ros2, sims, skills, urdf, world
 from .isaac import KitClient, KitError, find_isaac_sim, frames_to_mp4, launch as kit_launch
-from .memory import Session
+from .memory import ProjectMemory, Session
 from .targets import Runner, Target
 
 TOOLS: dict[str, str] = {}
@@ -20,6 +20,7 @@ class Toolbox:
     def __init__(self, root: pathlib.Path, runner: Runner | None = None):
         self.root = root
         self.session = Session(root)
+        self.memory = ProjectMemory(root)
         self.runner = runner or Runner(log=self.session.log)
         if self.runner.log is None:
             self.runner.log = self.session.log
@@ -233,6 +234,8 @@ class Toolbox:
         if self.runner.approver.decide("isaac-sim", label, f"{len(code.splitlines())} lines of Kit Python", detail=code[:4000]) != "run":
             return {"ok": False, "skipped": True, "note": "the user skipped this step; do not retry it another way"}
         r = self.kit.exec(code, timeout)
+        if why.strip() and not why.strip().lower().startswith("read-only"):
+            self.session.log({"type": "scene", "what": why.strip()[:200] + ("" if r.get("status") == "ok" else " (failed)")})
         return {"ok": r.get("status") == "ok", "output": r.get("output", "")[-6000:], "result": r.get("result"),
                 "error": (f"{r.get('ename')}: {r.get('evalue')}" if r.get("status") != "ok" else ""),
                 "traceback": "".join(r.get("traceback", []))[-3000:]}
@@ -249,6 +252,53 @@ class Toolbox:
     def isaac_capture(self, path: str = ".simwright/captures/frame.png") -> dict:
         p = str(self._out(path)).replace("\\", "/")
         return self.kit.call(f"await capture({json.dumps(p)})", timeout=180)
+
+    # ---------- project memory (shared by the panel, the terminal copilot and MCP clients) ----------
+    @tool("Read this project's memory: notes (decisions, saved stages, conventions, next steps), what Simwright changed "
+          "(files, scene edits, commands) and earlier conversations. Read it before continuing earlier work.")
+    def project_memory(self) -> dict:
+        return {"ok": True, "notes": self.memory.notes(), "session": self.session.summary(), "conversations": self.memory.history(10)}
+
+    @tool("Add a dated note to the project memory (.simwright/notes.md): a decision, a saved stage path, a convention, "
+          "or what to do next. Keep it one or two factual sentences with real paths.")
+    def project_note(self, text: str, kind: str = "note") -> dict:
+        return {"ok": True, "added": self.memory.add_note(text, kind)}
+
+    # ---------- placement and mounting ----------
+    @tool("Place any USD (file path or URL) in the open Isaac Sim stage the way a person would: units and up axis "
+          "fixed, footprint centered on (x, y) in meters, lowered onto the real surface under it (ray cast through the "
+          "support's mesh, so lamps or back panels don't lift it). `on` = support prim (table, shelf, pedestal), else "
+          "the floor; `z` forces the bottom height. Works inside moved/scaled groups. Check supported_fraction and warning.")
+    def isaac_place(self, url: str, prim_path: str, x: float = 0.0, y: float = 0.0, yaw: float = 0.0, on: str = "",
+                    z: float = -1.0, physics: str = "auto", use_xy: bool = True) -> dict:
+        xy = f"{float(x)}, {float(y)}" if (use_xy or not on) else "None, None"
+        zz = "None" if z is None or z < 0 else str(float(z))
+        r = self.kit.call(f"place_usd({json.dumps(prim_path)}, {json.dumps(url.replace(chr(92), '/'))}, {xy}, {float(yaw)}, "
+                          f"{zz}, {json.dumps(on or None)}, {json.dumps(physics)})", timeout=300)
+        if isinstance(r, dict) and r.get("ok"):
+            self.session.log({"type": "scene", "what": f"placed {prim_path} from {url.rsplit('/', 1)[-1]} bottom {r.get('bottom_m')} m"
+                              + (f" on {on}" if on else "")})
+        return r
+
+    @tool("Mount something on a robot link so it moves with it (wrist camera, sensor, tool, gripper adapter). It is "
+          "created under the link and aligned to a face of the link's own bounds (`face` +x/-x/+y/-y/+z/-z), touching it "
+          "(+ `gap` m); `offset` [x,y,z] m in the link frame, `rpy` [deg] in the item frame. url='camera' makes a USD "
+          "camera; `look` (+x, -z, ...) points it along a link axis. Mounted rigid bodies join the link (no nesting).")
+    def isaac_mount(self, name: str, url: str, link: str, face: str = "+z", offset: list = None, rpy: list = None,
+                    look: str = "", gap: float = 0.0, kind: str = "attach") -> dict:
+        off = [float(v) for v in (offset or [0, 0, 0])][:3]
+        rp = [float(v) for v in (rpy or [0, 0, 0])][:3]
+        u = url if url == "camera" else url.replace(chr(92), "/")
+        r = self.kit.call(f"mount({json.dumps(name)}, {json.dumps(u)}, {json.dumps(link)}, {json.dumps(face)}, {off}, {rp}, "
+                          f"{json.dumps(look or None)}, {float(gap)}, {json.dumps(kind)})", timeout=120)
+        if isinstance(r, dict) and r.get("ok"):
+            self.session.log({"type": "scene", "what": f"mounted {name} on {link} face {face}" + (f" looking {look}" if look else "")})
+        return r
+
+    @tool("Audit placement in the open stage: for each object `depth` levels under `scope`, is its bottom resting on "
+          "the real surface below it? Reports floating (gap > 1 cm) and sunk objects with exact gaps. Read-only, time-bounded.")
+    def isaac_placement_audit(self, scope: str = "/World", depth: int = 2, max_items: int = 120) -> dict:
+        return self.kit.call(f"placement_audit({json.dumps(scope)}, {int(depth)}, {int(max_items)})", timeout=120)
 
     # ---------- SimReady Central (NVIDIA's index of simulation-ready OpenUSD assets on Hugging Face) ----------
     @tool("Search SimReady Central for simulation-ready USD assets (physics, materials, real-world scale). Returns name, "
@@ -276,6 +326,9 @@ class Toolbox:
                           f"{json.dumps(on or None)}, {json.dumps(physics)})", timeout=300)
         if isinstance(r, dict):
             r["local_usd"] = usd
+            if r.get("ok"):
+                self.session.log({"type": "scene", "what": f"placed SimReady {usd.rsplit('/', 1)[-1]} at {prim_path}, bottom {r.get('bottom_m')} m"
+                                  + (f" on {on}" if on else "")})
         return r
 
     @tool("List SimReady packages already downloaded on this machine, with source revision and license.")

@@ -80,8 +80,30 @@ class SimwrightCopilotExtension(omni.ext.IExt):
                     ui.Button("Check scene", clicked_fn=lambda: self._send(
                         "Check the open scene: physics stability, lighting, articulations and anything that will break. Fix only with my approval."))
                     ui.Button("Stop", width=60, clicked_fn=self._on_stop)
+                    ui.Button("New chat", width=80, clicked_fn=self._on_reset)
                     self._mode = ui.ComboBox(1, "auto", "step", "ask", width=70)
         self._refresh_status()
+        s = self._serve()
+        if s:  # show the project's earlier conversation right away
+            self._ensure_pump(f"http://127.0.0.1:{s['port']}", s["token"])
+
+    def _on_reset(self):
+        ep = self._endpoint()
+        if not ep:
+            return
+        try:
+            r = _http("POST", ep[0] + "/reset", ep[1], {}, timeout=120)
+            if not r.get("ok"):
+                self._line(r.get("error", "could not start a new chat"), 0xFF5A8CFF)
+                return
+        except Exception as e:
+            self._line(self._explain(e), 0xFF5A8CFF)
+            return
+        try:
+            self._log.clear()
+        except Exception:
+            pass
+        self._ensure_pump(*ep)
 
     def _refresh_status(self, busy=None, queued=0):
         s = self._serve()
@@ -171,13 +193,21 @@ class SimwrightCopilotExtension(omni.ext.IExt):
             except Exception as e:
                 self._line("lost connection: " + self._explain(e), 0xFF5A8CFF)
                 return
-            for ev in r.get("events", []):
+            evs = r.get("events", [])
+            if evs and evs[0].get("restored") and self._since == 0:
+                self._line("earlier in this project", 0xFF7A7A7A)
+            for ev in evs:
                 self._since = ev["n"] + 1
                 t = ev.get("type")
+                old = ev.get("restored")
                 if t == "user":
-                    self._line("you: " + ev["text"], 0xFFB0E0FF)
+                    self._line("you: " + ev["text"], 0xFF7FA6BF if old else 0xFFB0E0FF)
                 elif t == "text":
-                    self._line(ev["text"])
+                    self._line(ev["text"], 0xFF9A9A9A if old else 0xFFDDDDDD)
+                elif t in ("info", "reset"):
+                    self._line(ev.get("text", ""), 0xFF9AB8D0)
+                    if ev.get("summary"):
+                        self._line(ev["summary"], 0xFF9A9A9A)
                 elif t == "tool":
                     self._line(f"- {ev['name']}({ev.get('args_brief', '')})", 0xFF9A9A9A)
                 elif t == "tool_result" and ev.get("ok") is False and ev.get("error"):

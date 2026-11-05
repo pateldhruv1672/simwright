@@ -98,6 +98,8 @@ HELP = """Slash commands
   /simready search <query> [--limit=8 --max_size=0.5] | fetch <url> | place <url> [--on=/World/table --x= --y= --yaw= --prim=] | list
   /lab installs|tasks|train <task>|jobs|runs|play <task>|export <task> <ckpt>|policies
   /mode auto|step|ask        auto = run uninterrupted (ESC pauses), step = confirm each command
+  /new                       start a new chat (the old one is summarized into .simwright/notes.md)
+  /notes  /note <text>       read or add project notes
   /image <path>              attach a photo (e.g. of a room to match)
   /exit
 Anything else is a prompt for the copilot."""
@@ -142,6 +144,16 @@ def repl(root):
                 elif c == "mode":
                     tb.runner.approver.mode = rest[0] if rest else "auto"
                     print("mode:", tb.runner.approver.mode)
+                elif c == "new":
+                    if agent is None:
+                        from .agent import Agent
+                        agent = Agent(root, tb)
+                    r = agent.reset()
+                    print("New chat." + ("\nSaved to the project notes:\n" + r["summary"] if r.get("summary") else ""))
+                elif c == "notes":
+                    print(tb.memory.notes() or "No project notes yet (.simwright/notes.md).")
+                elif c == "note":
+                    print(tb.memory.add_note(" ".join(rest)))
                 elif c == "image":
                     if agent is None:
                         from .agent import Agent
@@ -157,6 +169,8 @@ def repl(root):
             if agent is None:
                 from .agent import Agent
                 agent = Agent(root, tb)
+                if agent.restored:
+                    print(f"(continuing this project's conversation: {agent.restored} earlier messages; /new starts fresh)")
             agent.turn(line)
         except Exception as e:
             print(f"error: {e}")

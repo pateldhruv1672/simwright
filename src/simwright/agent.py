@@ -38,6 +38,12 @@ def build_system(root: pathlib.Path, toolbox: Toolbox, prompt: str) -> str:
              f"ROS target: {cfg.get('ros_target')}; build target: {cfg.get('build_target')}"]
     parts.append(f"\n## Project context ({name})\n{ctx[:20000]}" if ctx else
                  "\n## Project context\nNone yet. Suggest `/init` to scan the workspace and write SIMWRIGHT.md.")
+    notes = toolbox.memory.notes()
+    if notes:
+        parts.append("\n## Project notes (.simwright/notes.md: decisions, saved stages, next steps)\n" + notes)
+    past = toolbox.memory.history(5)
+    if past:
+        parts.append("\n## Earlier conversations in this project\n" + "\n".join(f"- {h['title']}" + (f": {h['summary'][:300]}" if h['summary'] else "") for h in past))
     mem = toolbox.session.summary()
     if mem:
         parts.append("\n## Session memory\n" + mem)
@@ -87,6 +93,12 @@ class Agent:
         self.emit = emit or self._print
         self.messages: list[dict] = []
         self.images: list[str] = []
+        restored = self.tb.memory.load_conversation()
+        if restored:  # continue where the project left off; the system prompt is rebuilt each turn
+            self.messages = [{"role": "system", "content": ""}] + restored
+            self.restored = len(restored)
+        else:
+            self.restored = 0
 
     @staticmethod
     def _print(ev: dict):
@@ -145,7 +157,32 @@ class Agent:
                         text = text[:14000] + '..."(truncated)"'
                     self.messages.append({"role": "tool", "tool_call_id": c.id, "content": text})
         self._trim()
+        try:
+            self.tb.memory.save_conversation(self.messages)
+        except Exception as e:
+            self.emit({"type": "error", "text": f"could not save the conversation: {e}"})
         return final
+
+    def reset(self) -> dict:
+        """Start a new chat: summarize this one into the project notes (decisions, files, next steps), archive it."""
+        convo = [m for m in self.messages if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str) and m["content"]]
+        summary = ""
+        if convo:
+            try:
+                text = "\n".join(f"{m['role']}: {m['content'][:1500]}" for m in convo[-40:])
+                r = self.client.chat.completions.create(model=self.model, messages=[
+                    {"role": "system", "content": "Summarize this robotics simulation work session for the project's notes: what was built or "
+                     "changed (real file and prim paths), what was verified and how, decisions, open problems and next steps. "
+                     "At most 8 terse bullets. No preamble."},
+                    {"role": "user", "content": text}])
+                summary = (r.choices[0].message.content or "").strip()
+            except Exception as e:
+                summary = f"(summary failed: {e})"
+            if summary:
+                self.tb.memory.add_note("Session summary:\n" + summary, "session")
+        out = self.tb.memory.archive(summary)
+        self.messages = []
+        return {**out, "summary": summary}
 
     def _cancelled(self) -> bool:
         ev = getattr(self, "cancel", None)

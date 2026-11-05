@@ -24,4 +24,8 @@ packages = ["src/simwright"]
 "install" = "simwright/_data/install"
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = [
+    "numpy>=2.2.6",
+    "pytest>=8",
+    "usd-core>=26.8",
+]

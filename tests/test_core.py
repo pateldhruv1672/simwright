@@ -466,3 +466,169 @@ def test_serve_queue_and_stop(tmp_path, monkeypatch):
             break
         _t.sleep(0.01)
     assert ran == ["first", "after"]
+
+
+# ---------------- placement and mount geometry (real USD via usd-core) ----------------
+def _box_mesh(stage, path, mn, mx):
+    from pxr import UsdGeom, Gf, Vt
+    m = UsdGeom.Mesh.Define(stage, path)
+    x0, y0, z0 = mn; x1, y1, z1 = mx
+    pts = [(x0, y0, z0), (x1, y0, z0), (x1, y1, z0), (x0, y1, z0), (x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1)]
+    faces = [(0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)]
+    m.CreatePointsAttr([Gf.Vec3f(*p) for p in pts])
+    m.CreateFaceVertexCountsAttr([4] * 6)
+    m.CreateFaceVertexIndicesAttr([i for f in faces for i in f])
+    m.CreateExtentAttr([Gf.Vec3f(*mn), Gf.Vec3f(*mx)])
+    return m
+
+
+def _asset(tmp_path, name, boxes, mpu=1.0, up="Z"):
+    from pxr import Usd, UsdGeom
+    f = tmp_path / f"{name}.usda"
+    st = Usd.Stage.CreateNew(str(f))
+    UsdGeom.SetStageMetersPerUnit(st, mpu); UsdGeom.SetStageUpAxis(st, up)
+    root = UsdGeom.Xform.Define(st, "/Root"); st.SetDefaultPrim(root.GetPrim())
+    for i, (mn, mx) in enumerate(boxes):
+        _box_mesh(st, f"/Root/b{i}", mn, mx)
+    st.Save()
+    return str(f)
+
+
+def _helpers_with_stage():
+    from pxr import Usd, UsdGeom
+    from simwright import kit_helpers as kh
+    st = Usd.Stage.CreateInMemory()
+    UsdGeom.SetStageMetersPerUnit(st, 1.0); UsdGeom.SetStageUpAxis(st, "Z")
+    UsdGeom.Xform.Define(st, "/World")
+    kh._TEST_STAGE = st
+    return kh, st
+
+
+def test_ray_down_heights_pure():
+    from simwright.kit_helpers import ray_down_heights, rest_height
+    floor = [[(0, 0, 0), (10, 0, 0), (10, 10, 0)], [(0, 0, 0), (10, 10, 0), (0, 10, 0)]]
+    shelf = [[(2, 2, 1), (4, 2, 1), (4, 4, 1)], [(2, 2, 1), (4, 4, 1), (2, 4, 1)]]
+    wall = [[(5, 5, 0), (5, 6, 0), (5, 5, 3)]]                     # vertical: never a surface
+    h = ray_down_heights(floor + shelf + wall, [(3, 3), (8, 8), (20, 20)])
+    assert h[0] == 1.0 and h[1] == 0.0 and h[2] is None
+    assert ray_down_heights(floor + shelf, [(3, 3)], z_ceiling=0.5) == [0.0]
+    z, frac = rest_height(floor + shelf, (3.5, 3.5, 2), (4.5, 4.5, 3))   # half over the shelf edge
+    assert z == 1.0 and 0.3 < frac < 0.7
+
+
+def test_place_usd_uses_the_surface_not_the_bounds(tmp_path):
+    kh, st = _helpers_with_stage()
+    try:
+        # table in centimetres, Y-up: top at 75 cm, with a 60 cm lamp standing in one corner
+        table = _asset(tmp_path, "table", [((-60, 72, -40), (60, 75, 40)), ((-60, 0, -40), (-55, 72, -35)),
+                                           ((50, 75, 25), (58, 135, 33))], mpu=0.01, up="Y")
+        mug = _asset(tmp_path, "mug", [((-0.04, -0.04, 0), (0.04, 0.04, 0.1))])
+        _box_mesh(st, "/World/floor", (-5, -5, -0.1), (5, 5, 0))
+        rt = kh.place_usd("/World/table", table, 0, 0)
+        assert abs(rt["bottom_m"] - 0.0) < 0.003 and abs(rt["size_m"][2] - 1.35) < 0.01   # Y-up cm asset stands upright, 1.35 m with lamp
+        r = kh.place_usd("/World/mug", mug, -0.2, 0.0, on="/World/table")
+        assert abs(r["bottom_m"] - 0.75) < 0.003, r                     # on the tabletop, not on the lamp (1.35 m)
+        assert r["supported_fraction"] == 1.0 and r["inside_support_xy"]
+        r2 = kh.place_usd("/World/mug2", mug, 0.54, -0.29, on="/World/table")  # over the lamp (Y-up +Z faces -Y)
+        assert r2["bottom_m"] > 1.3                                     # footprint overlaps the lamp: it rests on top of it
+    finally:
+        kh._TEST_STAGE = None
+
+
+def test_place_usd_inside_moved_scaled_group_and_raised_floor(tmp_path):
+    from pxr import UsdGeom, Gf
+    kh, st = _helpers_with_stage()
+    try:
+        g = UsdGeom.Xform.Define(st, "/World/Group")
+        g.AddTranslateOp().Set(Gf.Vec3d(5, 0, 0.3)); g.AddRotateZOp().Set(30.0); g.AddScaleOp().Set(Gf.Vec3f(0.5, 0.5, 0.5))
+        _box_mesh(st, "/World/platform", (-10, -10, 0), (10, 10, 0.2))      # raised floor at 0.2 m
+        crate = _asset(tmp_path, "crate", [((-0.25, -0.25, 0), (0.25, 0.25, 0.5))])
+        r = kh.place_usd("/World/Group/crate", crate, 2.0, 1.0)
+        assert abs(r["bottom_m"] - 0.2) < 0.003, r                      # lands on the platform, not at z = 0 or the group's 0.3
+        cx = (r["bbox_min"][0] + r["bbox_max"][0]) / 2; cy = (r["bbox_min"][1] + r["bbox_max"][1]) / 2
+        assert abs(cx - 2.0) < 0.003 and abs(cy - 1.0) < 0.003          # world target despite the group transform
+        assert abs(r["size_m"][2] - 0.5) < 0.003                        # the group's 0.5 scale did not shrink it
+        r = kh.place_usd("/World/Group/crate2", crate, 2.0, 1.0, z=1.25)
+        assert abs(r["bottom_m"] - 1.25) < 0.003
+    finally:
+        kh._TEST_STAGE = None
+
+
+def test_mount_follows_link_and_touches_face(tmp_path):
+    from pxr import UsdGeom, Gf
+    kh, st = _helpers_with_stage()
+    try:
+        arm = UsdGeom.Xform.Define(st, "/World/arm")
+        arm.AddTranslateOp().Set(Gf.Vec3d(1, 2, 1)); arm.AddRotateYOp().Set(90.0)        # link x-axis now points down (-Z world)
+        link = UsdGeom.Xform.Define(st, "/World/arm/wrist")
+        _box_mesh(st, "/World/arm/wrist/geo", (-0.03, -0.03, -0.05), (0.03, 0.03, 0.05))
+        cam = kh.mount("wrist_cam", "camera", "/World/arm/wrist", face="+x", look="+x")
+        assert cam["path"] == "/World/arm/wrist/wrist_cam"
+        fw = cam["camera_forward_world"]
+        assert abs(fw[2] + 1) < 1e-3                                   # looks along the link's +X = world down
+        assert abs(cam["local_translate_m"][0] - 0.03) < 1e-4          # on the +X face of the link
+        cam_box = _asset(tmp_path, "cambox", [((-0.02, -0.01, 0), (0.02, 0.01, 0.025))], mpu=1.0)
+        m = kh.mount("d435", cam_box, "/World/arm/wrist", face="+z")
+        assert abs(m["touch_gap_m"]) < 1e-4, m                         # sits exactly on the +Z face
+        assert abs(m["local_translate_m"][2] - 0.05) < 1e-4
+        m2 = kh.mount("d435", cam_box, "/World/arm/wrist", face="+z", gap=0.005)   # re-mount replaces
+        assert abs(m2["touch_gap_m"] - 0.005) < 1e-4 and len([c for c in st.GetPrimAtPath("/World/arm/wrist").GetChildren() if c.GetName() == "d435"]) == 1
+    finally:
+        kh._TEST_STAGE = None
+
+
+def test_placement_audit_flags_floating(tmp_path):
+    from pxr import UsdGeom, Gf
+    kh, st = _helpers_with_stage()
+    try:
+        _box_mesh(st, "/World/floor/geo", (-5, -5, -0.1), (5, 5, 0))
+        _box_mesh(st, "/World/things/ok/geo", (0, 0, 0), (0.3, 0.3, 0.3))
+        _box_mesh(st, "/World/things/floater/geo", (1, 1, 0.08), (1.3, 1.3, 0.38))
+        _box_mesh(st, "/World/things/sunk/geo", (2, 2, -0.05), (2.3, 2.3, 0.25))
+        a = kh.placement_audit("/World/things", depth=1)
+        by = {r["path"].split("/")[-1]: r for r in a["rows"]}
+        assert by["ok"]["state"] == "resting" and by["floater"]["state"] == "floating" and abs(by["floater"]["gap_m"] - 0.08) < 1e-3
+        assert by["sunk"]["state"] in ("sunk", "no surface below") and not a["ok"]
+    finally:
+        kh._TEST_STAGE = None
+
+
+
+def test_place_asset_fit_and_floor(tmp_path):
+    kh, st = _helpers_with_stage()
+    try:
+        _box_mesh(st, "/World/floor", (-5, -5, -0.1), (5, 5, 0.05))
+        desk = _asset(tmp_path, "desk", [((-80, 0, -40), (80, 75, 40))], mpu=0.01, up="Y")   # 1.6 x 0.8 m, Y-up cm
+        r = kh.place_asset("/World/desk", desk, 1.0, 1.0, yaw_deg=90, fit=[1.2, 0.6])
+        assert abs(r["bottom_m"] - 0.05) < 0.003 and abs(max(r["size_m"][:2]) - 1.2) < 0.01 and abs(min(r["size_m"][:2]) - 0.6) < 0.01, r
+        b = kh.place_asset("/World/box", "", 2.0, 2.0, fit=[0.5, 0.5, 0.4])
+        assert abs(b["bbox_min"][2] - 0.05) < 0.003
+    finally:
+        kh._TEST_STAGE = None
+
+
+
+def test_project_memory_roundtrip(tmp_path, monkeypatch):
+    from simwright.memory import ProjectMemory
+    pm = ProjectMemory(tmp_path)
+    msgs = [{"role": "system", "content": "sys"}, {"role": "tool", "tool_call_id": "x", "content": "{}"},
+            {"role": "user", "content": [{"type": "text", "text": "build a kitchen"}, {"type": "image_url", "image_url": {"url": "data:..."}}]},
+            {"role": "assistant", "content": "done, saved ~/robotics/scenes/kitchen.usd"}]
+    pm.save_conversation(msgs)
+    back = pm.load_conversation()
+    assert back[0]["role"] == "user" and back[0]["content"] == "build a kitchen" and len(back) == 2   # no system, no orphan tool, no image
+    pm.add_note("saved kitchen at ~/robotics/scenes/kitchen.usd", "scene")
+    assert "kitchen.usd" in pm.notes()
+    a = pm.archive("- built kitchen")
+    assert a["archived"] and pm.load_conversation() == [] and pm.history()[0]["title"] == "build a kitchen"
+
+
+def test_serve_events_persist_across_restart(tmp_path, monkeypatch):
+    from simwright import serve
+    monkeypatch.setattr(config, "HOME", tmp_path / "home")
+    st = serve.State(tmp_path)
+    st.emit({"type": "user", "text": "hello"}); st.emit({"type": "text", "text": "hi there"}); st.emit({"type": "done"})
+    st2 = serve.State(tmp_path)
+    kinds = [(e["type"], e.get("text")) for e in st2.events]
+    assert ("user", "hello") in kinds and ("text", "hi there") in kinds and all(e.get("restored") for e in st2.events)
+    assert [e["n"] for e in st2.events] == list(range(len(st2.events)))
