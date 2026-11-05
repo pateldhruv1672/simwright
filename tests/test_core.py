@@ -535,6 +535,30 @@ def test_place_usd_uses_the_surface_not_the_bounds(tmp_path):
         kh._TEST_STAGE = None
 
 
+def test_place_usd_on_implicit_box_table_top(tmp_path):
+    """Regression (Nov 4): a kettle on a scaled UsdGeom.Cube table top was reported as 0% supported because only
+    Mesh prims were ray cast. Cube, Cylinder and Plane shapes must count as surfaces."""
+    from pxr import UsdGeom, Gf
+    kh, st = _helpers_with_stage()
+    try:
+        top = UsdGeom.Cube.Define(st, "/World/Table/Top"); top.CreateSizeAttr(1.0)
+        x = UsdGeom.Xformable(top); x.AddTranslateOp().Set(Gf.Vec3d(0.55, 0, 0.74)); x.AddScaleOp().Set(Gf.Vec3f(0.6, 1.0, 0.04))
+        ped = UsdGeom.Cylinder.Define(st, "/World/Pedestal"); ped.CreateRadiusAttr(0.2); ped.CreateHeightAttr(0.5)
+        UsdGeom.Xformable(ped).AddTranslateOp().Set(Gf.Vec3d(3, 0, 0.25))
+        pl = UsdGeom.Plane.Define(st, "/World/Ground"); pl.CreateWidthAttr(20); pl.CreateLengthAttr(20)
+        kettle = _asset(tmp_path, "kettle", [((-0.073, -0.105, 0), (0.073, 0.105, 0.24))])
+        r = kh.place_usd("/World/Kettle", kettle, 0.60, 0.30, on="/World/Table/Top")
+        assert abs(r["bottom_m"] - 0.761) < 0.002, r
+        assert r["supported_fraction"] == 1.0 and "warning" not in r, r
+        assert "warning" not in r["height_method"] and r["height_method"]["triangles"] == 12
+        r = kh.place_usd("/World/K2", kettle, 3.0, 0.0, on="/World/Pedestal")
+        assert abs(r["bottom_m"] - 0.501) < 0.002, r
+        r = kh.place_usd("/World/K3", kettle, -4.0, 2.0)                  # floor: the Plane at z = 0
+        assert abs(r["bottom_m"] - 0.001) < 0.002 and r["supported_fraction"] == 1.0, r
+    finally:
+        kh._TEST_STAGE = None
+
+
 def test_place_usd_inside_moved_scaled_group_and_raised_floor(tmp_path):
     from pxr import UsdGeom, Gf
     kh, st = _helpers_with_stage()
@@ -967,3 +991,14 @@ def test_cli_teleop_and_rokoko_commands_exist(tmp_path, capsys):
     cli.main(["--root", str(tmp_path), "rokoko", "listen", "0.3"])
     out = capsys.readouterr().out
     assert '"frames": 0' in out and "Custom" in out
+
+
+def test_cli_simready_usage_and_capture_view_args():
+    from simwright.cli import dispatch, _view_kw
+    for rest in (["place", "--help"], ["--help"], ["help"]):
+        r = dispatch(None, "simready", rest)
+        assert r["ok"] and "place <url>" in r["usage"]
+    r = dispatch(None, "simready", ["place"])
+    assert r["ok"] is False and "URL" in r["error"]
+    assert _view_kw(["out.png", "--eye=1.5,1.1,1.5", "--target", "0.5,0.1,0.8"]) == {"eye": "1.5,1.1,1.5", "target": "0.5,0.1,0.8"}
+    assert _view_kw(["out.png"]) == {}

@@ -17,7 +17,7 @@ _TEST_STAGE = None
 _ASSET_CACHE = globals().get("_ASSET_CACHE") or {}
 
 
-HELPERS_VERSION = "0.5.3"
+HELPERS_VERSION = "0.5.7"
 
 
 def _stage():
@@ -765,27 +765,53 @@ async def physics_check(seconds=3.0, floor_z=0.0, keep_playing=False, force=Fals
             "sim_seconds": round(sim_t, 2), "frames": frames, "issues": issues[:40], "lights": light_check(), "backup": bk.get("path")}
 
 
-async def capture(path, frames_before=4):
+async def capture(path, frames_before=4, eye=None, target=None):
+    """Viewport PNG. With eye/target (meters, Z up) the shot comes from a temporary session-layer camera and the
+    viewport's own camera is restored afterwards, so the user's working view never moves."""
     from omni.kit.viewport.utility import capture_viewport_to_file, get_active_viewport
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    for _ in range(frames_before):
-        await _app().next_update_async()
     vp = get_active_viewport()
     if vp is None:
         return {"ok": False, "error": "no active viewport (headless without a viewport?)"}
-    path = os.path.abspath(path)
-    cap = capture_viewport_to_file(vp, file_path=path, is_hdr=False)
-    await cap.wait_for_result()
-    size, last, stable = 0, -1, 0
-    for _ in range(240):  # the PNG is written after the capture resolves; wait until its size settles
-        await _app().next_update_async()
-        size = os.path.getsize(path) if os.path.exists(path) else 0
-        stable = stable + 1 if size and size == last else 0
-        last = size
-        if stable >= 3:
-            break
-    return {"ok": size > 0, "path": path, "bytes": size,
-            "hint": "" if size > 150_000 else "small frame: probably black or empty; check lights and camera"}
+    st, prev, tmp = _stage(), None, "/World/SimwrightCaptureCam"
+    try:
+        if eye is not None and target is not None:
+            smpu = UsdGeom.GetStageMetersPerUnit(st) or 1.0
+            e = Gf.Vec3d(*[float(v) / smpu for v in eye]); t = Gf.Vec3d(*[float(v) / smpu for v in target])
+            if (e - t).GetLength() < 1e-6:
+                return {"ok": False, "error": "eye and target are the same point"}
+            up = Gf.Vec3d(0, 0, 1) if UsdGeom.GetStageUpAxis(st) == UsdGeom.Tokens.z else Gf.Vec3d(0, 1, 0)
+            with Usd.EditContext(st, st.GetSessionLayer()):
+                cam = UsdGeom.Camera.Define(st, tmp)
+                cam.CreateFocalLengthAttr(24.0); cam.CreateClippingRangeAttr(Gf.Vec2f(0.01 / smpu, 1000.0 / smpu))
+                UsdGeom.Xformable(cam).AddTransformOp().Set(Gf.Matrix4d().SetLookAt(e, t, up).GetInverse())
+            prev = vp.camera_path
+            vp.camera_path = tmp
+            frames_before = max(frames_before, 12)   # let the renderer settle on the new view
+        for _ in range(frames_before):
+            await _app().next_update_async()
+        path = os.path.abspath(path)
+        cap = capture_viewport_to_file(vp, file_path=path, is_hdr=False)
+        await cap.wait_for_result()
+        size, last, stable = 0, -1, 0
+        for _ in range(240):  # the PNG is written after the capture resolves; wait until its size settles
+            await _app().next_update_async()
+            size = os.path.getsize(path) if os.path.exists(path) else 0
+            stable = stable + 1 if size and size == last else 0
+            last = size
+            if stable >= 3:
+                break
+    finally:
+        if prev is not None:
+            vp.camera_path = prev
+        if st.GetPrimAtPath(tmp):
+            with Usd.EditContext(st, st.GetSessionLayer()):
+                st.RemovePrim(tmp)
+    out = {"ok": size > 0, "path": path, "bytes": size,
+           "hint": "" if size > 150_000 else "small frame: probably black or empty; check lights and camera"}
+    if prev is not None:
+        out.update({"eye": list(eye), "target": list(target), "viewport_camera_restored": str(vp.camera_path)})
+    return out
 
 
 async def record(folder, seconds=4.0, fps=15):
@@ -894,8 +920,41 @@ def rest_height(tris, mn, mx, z_ceiling=float("inf"), n=3):
     return top, touching / len(hs)
 
 
+def _implicit_local_tris(p, segments=24):
+    """Local-space triangles of USD's built-in shapes (Cube, Cylinder, Plane) so a box table top or a cylinder
+    pedestal counts as a surface like a mesh does. None for anything else."""
+    import numpy as np
+    if p.IsA(UsdGeom.Cube):
+        h = float(UsdGeom.Cube(p).GetSizeAttr().Get() or 2.0) / 2.0
+        v = np.array([(-h, -h, -h), (h, -h, -h), (h, h, -h), (-h, h, -h), (-h, -h, h), (h, -h, h), (h, h, h), (-h, h, h)])
+        f = [(0, 2, 1), (0, 3, 2), (4, 5, 6), (4, 6, 7), (0, 1, 5), (0, 5, 4), (1, 2, 6), (1, 6, 5), (2, 3, 7), (2, 7, 6), (3, 0, 4), (3, 4, 7)]
+        return v[np.array(f)]
+    axis_of = lambda a: {"X": (1, 2, 0), "Y": (2, 0, 1)}.get(str(a or "Z"), (0, 1, 2))   # local (u, v, axis) -> xyz index
+    def orient(P, axis):
+        i, j, k = axis_of(axis)
+        Q = np.zeros_like(P); Q[..., i], Q[..., j], Q[..., k] = P[..., 0], P[..., 1], P[..., 2]
+        return Q
+    if p.IsA(UsdGeom.Cylinder):
+        c = UsdGeom.Cylinder(p)
+        r = float(c.GetRadiusAttr().Get() or 1.0); hh = float(c.GetHeightAttr().Get() or 2.0) / 2.0
+        a = np.linspace(0, 2 * np.pi, segments, endpoint=False)
+        ring = np.stack([r * np.cos(a), r * np.sin(a)], 1)
+        tris = []
+        for s in range(segments):
+            p0, p1 = ring[s], ring[(s + 1) % segments]
+            tris += [[(0, 0, hh), (p0[0], p0[1], hh), (p1[0], p1[1], hh)], [(0, 0, -hh), (p1[0], p1[1], -hh), (p0[0], p0[1], -hh)],
+                     [(p0[0], p0[1], -hh), (p1[0], p1[1], -hh), (p1[0], p1[1], hh)], [(p0[0], p0[1], -hh), (p1[0], p1[1], hh), (p0[0], p0[1], hh)]]
+        return orient(np.array(tris, dtype=np.float64), c.GetAxisAttr().Get())
+    if hasattr(UsdGeom, "Plane") and p.IsA(UsdGeom.Plane):
+        pl = UsdGeom.Plane(p)
+        w = float(pl.GetWidthAttr().Get() or 2.0) / 2.0; l = float(pl.GetLengthAttr().Get() or 2.0) / 2.0
+        q = np.array([[(-w, -l, 0), (w, -l, 0), (w, l, 0)], [(-w, -l, 0), (w, l, 0), (-w, l, 0)]], dtype=np.float64)
+        return orient(q, pl.GetAxisAttr().Get())
+    return None
+
+
 def _tris_world(prims, max_tris=400000, budget_s=6.0, exclude=None, xy_box=None):
-    """World-space triangles of every Mesh under `prims` (instance proxies included), fan-triangulated.
+    """World-space triangles of every Mesh (and Cube/Cylinder/Plane shape) under `prims` (instance proxies included), fan-triangulated.
     Bounded by max_tris and a time budget so it can never hang Kit. xy_box=(xmin,ymin,xmax,ymax) skips meshes
     whose world bounds miss it."""
     import numpy as np
@@ -912,7 +971,8 @@ def _tris_world(prims, max_tris=400000, budget_s=6.0, exclude=None, xy_box=None)
                 break
             if ex and (str(p.GetPath()) == ex or str(p.GetPath()).startswith(ex + "/")):
                 continue
-            if not p.IsA(UsdGeom.Mesh):
+            is_mesh = p.IsA(UsdGeom.Mesh)
+            if not is_mesh and not p.IsA(UsdGeom.Gprim):
                 continue
             im = UsdGeom.Imageable(p)
             if im.ComputeVisibility() == UsdGeom.Tokens.invisible or im.ComputePurpose() in (UsdGeom.Tokens.guide, UsdGeom.Tokens.proxy):
@@ -921,6 +981,14 @@ def _tris_world(prims, max_tris=400000, budget_s=6.0, exclude=None, xy_box=None)
                 r = cache.ComputeWorldBound(p).ComputeAlignedRange()
                 if r.IsEmpty() or r.GetMax()[0] < xy_box[0] or r.GetMin()[0] > xy_box[2] or r.GetMax()[1] < xy_box[1] or r.GetMin()[1] > xy_box[3]:
                     continue
+            if not is_mesh:   # Cube / Cylinder / Plane: exact local triangles, then the same world transform
+                L = _implicit_local_tris(p)
+                if L is None or not len(L):
+                    continue
+                M = np.asarray(xc.GetLocalToWorldTransform(p), dtype=np.float64)
+                chunks.append(L @ M[:3, :3] + M[3, :3])
+                n += len(L)
+                continue
             m = UsdGeom.Mesh(p)
             pts = m.GetPointsAttr().Get()
             cnt = m.GetFaceVertexCountsAttr().Get()

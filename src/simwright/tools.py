@@ -311,10 +311,19 @@ class Toolbox:
             r["previous_crash"] = prev
         return r
 
-    @tool("Save a viewport screenshot (PNG) to a path on this machine.")
-    def isaac_capture(self, path: str = ".simwright/captures/frame.png") -> dict:
+    @tool("Save a viewport screenshot (PNG) to a path on this machine. Optional eye and target ('x,y,z' in meters, Z up) frame the "
+          "shot from a temporary camera; the viewport's own camera is restored afterwards. Without them the current viewport view is used.")
+    def isaac_capture(self, path: str = ".simwright/captures/frame.png", eye: str = "", target: str = "") -> dict:
         p = str(self._out(path)).replace("\\", "/")
-        return self.kit.call(f"await capture({json.dumps(p)})", timeout=180)
+        def vec(s):
+            v = [float(x) for x in str(s).replace(" ", "").split(",") if x != ""]
+            if len(v) != 3:
+                raise ValueError(f"expected x,y,z in meters, got {s!r}")
+            return v
+        view = f", eye={vec(eye)!r}, target={vec(target)!r}" if (eye and target) else ""
+        if bool(eye) != bool(target):
+            return {"ok": False, "error": "give both eye and target (x,y,z in meters), or neither to use the viewport camera"}
+        return self.kit.call(f"await capture({json.dumps(p)}{view})", timeout=180)
 
     # ---------- teleoperation: Rokoko suit + gloves -> Unitree G1 (WBC-AGILE legs) ----------
     @tool("Start full-body teleoperation of the Unitree G1 in the open Isaac Sim scene from a Rokoko Smartsuit + Smartgloves "

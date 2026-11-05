@@ -96,7 +96,7 @@ HELP = """Slash commands
   /urdf <file>   /build [pkgs]   /mujoco <xml>   /gazebo <world>
   /isaac launch|status|scene|check|capture|record|assets <kw>
   /world <spec.json>
-  /simready search <query> [--limit=8 --max_size=0.5] | fetch <url> | place <url> [--on=/World/table --x= --y= --yaw= --prim=] | list
+  /simready search <query> [--limit=8 --max_size=0.5] | fetch <url> | place <url> [--on=/World/Table/Top --x= --y= --yaw= --prim= --physics=] | list
   /lab installs|tasks|train <task>|jobs|runs|play <task>|export <task> <ckpt>|policies
   /mode auto|step|ask        auto = run uninterrupted (ESC pauses), step = confirm each command
   /new                       start a new chat (the old one is summarized into .simwright/notes.md)
@@ -233,7 +233,8 @@ def dispatch(tb, c, rest):
     if c == "isaac":
         sub = a[0] or "status"
         return {"launch": lambda: tb.isaac_launch("--headless" in rest, True if "--ros" in rest else (False if "--no-ros" in rest else None)), "status": tb.isaac_status, "scene": tb.isaac_scene,
-                "check": lambda: tb.isaac_physics_check(float(a[1] or 3)), "capture": lambda: tb.isaac_capture(a[1] or ".simwright/captures/frame.png"),
+                "check": lambda: tb.isaac_physics_check(float(a[1] or 3)), "capture": lambda: tb.isaac_capture(next((x for x in rest[1:] if not x.startswith("--")), ".simwright/captures/frame.png"),
+                                                 **_view_kw(rest[1:])),
                 "record": lambda: tb.isaac_record(float(a[1] or 4)), "assets": lambda: tb.isaac_asset_search(rest[1:]),
                 "exec": lambda: tb.isaac_exec(pathlib.Path(a[1]).read_text() if a[1] != "-" else sys.stdin.read()),
                 "repair": lambda: tb.isaac_physics_repair(a[1] if a[1] and not a[1].startswith("--") else "/World", apply="--apply" in rest),
@@ -245,6 +246,10 @@ def dispatch(tb, c, rest):
         return r
     if c == "simready":
         sub = a[0]
+        usage = ("simready search <query> [--limit=8 --max_size=0.5] | fetch <url> | "
+                 "place <url> [--on=/World/Table/Top --x= --y= --yaw= --prim= --physics=auto|dynamic|static|none] | list")
+        if not sub or sub in ("-h", "--help", "help") or any(x in ("-h", "--help") for x in rest[1:]):
+            return {"ok": True, "usage": usage}
         pos, kw, items, i = [], {}, list(rest[1:]), 0
         while i < len(items):
             x = items[i]
@@ -259,6 +264,8 @@ def dispatch(tb, c, rest):
         if sub == "search":
             return tb.simready_search(" ".join(pos), int(kw.get("limit", 8)), float(kw.get("max_size", 0)),
                                       float(kw.get("min_size", 0)), kw.get("dataset", ""))
+        if sub in ("fetch", "get", "place") and not pos:
+            return {"ok": False, "error": f"simready {sub} needs an asset URL or a local USD path", "usage": usage}
         if sub in ("fetch", "get"):
             return tb.simready_fetch(pos[0])
         if sub == "place":
@@ -298,6 +305,19 @@ def dispatch(tb, c, rest):
         if sub == "deploy":
             return tb.policy_deploy(a[1], a[2])
     raise ValueError(f"unknown command /{c} {' '.join(rest)} (try /help)")
+
+
+def _view_kw(args):
+    """--eye=x,y,z --target=x,y,z (or '--eye x,y,z') for isaac capture."""
+    out, i = {}, 0
+    while i < len(args):
+        k, eq, v = args[i].lstrip("-").partition("=")
+        if k in ("eye", "target"):
+            if not eq and i + 1 < len(args):
+                v, i = args[i + 1], i + 1
+            out[k] = v
+        i += 1
+    return out
 
 
 def _kv(args):
