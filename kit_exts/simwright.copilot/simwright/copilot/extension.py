@@ -80,7 +80,7 @@ class SimwrightCopilotExtension(omni.ext.IExt):
                             self._asset_query = ui.StringField()
                             ui.Button("Search", width=65, clicked_fn=lambda: self._start_asset_search(0))
                         self._asset_status = ui.Label("Search the public catalog across publishers, not just downloaded assets.", word_wrap=True, height=30)
-                        with ui.ScrollingFrame(height=180):
+                        with ui.ScrollingFrame(height=300):
                             self._asset_rows = ui.VStack(spacing=6, height=0)
                         self._asset_more = ui.Button("More results", height=24, enabled=False, clicked_fn=self._more_assets)
                 self._prompt = ui.StringField(height=64, multiline=True)
@@ -129,13 +129,21 @@ class SimwrightCopilotExtension(omni.ext.IExt):
             ui = self._ui
             with self._asset_rows:
                 for hit in hits:
-                    with ui.VStack(spacing=2, height=0):
-                        ui.Label(hit.get("name", "Asset").replace("_", " "), word_wrap=True, height=26)
-                        dims = hit.get("dims_m")
-                        detail = hit.get("dataset", "") + (" · " + " × ".join(f"{v:.2f}" for v in dims) + " m" if dims else " · size unknown")
-                        ui.Label(detail, word_wrap=True, height=24)
-                        url = hit.get("url", "")
-                        ui.Button("Add to scene…", height=24, clicked_fn=lambda u=url: self._send("Use simready_place to add this asset to the current scene. Inspect the scene and choose a free, supported spot; preserve existing objects. Check physics and capture the result. Asset: " + u))
+                    with ui.HStack(spacing=8, height=84):
+                        thumb = hit.get("thumb_path") or ""
+                        with ui.ZStack(width=84, height=84):
+                            ui.Rectangle(style={"background_color": 0x14FFFFFF, "border_radius": 6})
+                            if thumb and os.path.exists(thumb):
+                                ui.Image(thumb, width=84, height=84, fill_policy=ui.FillPolicy.PRESERVE_ASPECT_FIT)
+                            else:
+                                ui.Label("no preview", alignment=ui.Alignment.CENTER, style={"color": 0xFF7A7A7A, "font_size": 12})
+                        with ui.VStack(spacing=2):
+                            ui.Label(hit.get("name", "Asset").replace("_", " "), word_wrap=True, height=22)
+                            dims = hit.get("dims_m")
+                            detail = hit.get("dataset", "") + (" · " + " × ".join(f"{v:.2f}" for v in dims) + " m" if dims else " · size unknown")
+                            ui.Label(detail, word_wrap=True, height=28, style={"color": 0xFF9A9A9A, "font_size": 12})
+                            url = hit.get("url", "")
+                            ui.Button("Add to scene…", height=24, clicked_fn=lambda u=url: self._send("Use simready_place to add this asset to the current scene. Inspect the scene and choose a free, supported spot; preserve existing objects. Check physics and capture the result. Asset: " + u))
         except Exception as e:
             if generation == self._asset_generation and self._window:
                 self._asset_status.text = "Library unavailable: " + self._explain(e)

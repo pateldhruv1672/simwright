@@ -175,6 +175,8 @@ def make_handler(state: State, token: str):
                     if not query:
                         return self._json(400, {"error": "enter a search term"})
                     result = simready.search(query, limit=12, offset=max(0, int(data.get("offset", 0))))
+                    if result.get("hits") and data.get("thumbnails", True):
+                        result["hits"] = simready.with_thumbnails(result["hits"])
                     self._json(200, result)
                 except Exception as e:
                     self._json(502, {"error": str(e)})

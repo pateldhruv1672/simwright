@@ -207,5 +207,38 @@ def local(url_or_path: str) -> str:
     return fetch(url_or_path)["local_usd"]
 
 
+def thumbnail(url: str, timeout: int = 10) -> str:
+    """Local cached PNG preview for a SimReady thumbnail URL, or '' when there is none. Runs outside Kit."""
+    if not url or not url.startswith("https://huggingface.co/datasets/"):
+        return ""
+    d = cache_root() / "thumbs"
+    f = d / (hashlib.sha256(url.encode()).hexdigest()[:24] + ".png")
+    if f.exists() and f.stat().st_size > 0:
+        return str(f)
+    req = urllib.request.Request(url, headers=UA)
+    tok = os.environ.get("HF_TOKEN")
+    if tok:
+        req.add_header("Authorization", f"Bearer {tok}")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = r.read(2_000_001)
+    except Exception:
+        return ""
+    if len(data) > 2_000_000 or not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ""
+    d.mkdir(parents=True, exist_ok=True)
+    tmp = f.with_suffix(".part")
+    tmp.write_bytes(data)
+    os.replace(tmp, f)
+    return str(f)
+
+
+def with_thumbnails(hits: list[dict], workers: int = 8) -> list[dict]:
+    """Add thumb_path (local file) to each hit, downloading previews in parallel."""
+    with cf.ThreadPoolExecutor(max_workers=workers) as ex:
+        paths = list(ex.map(lambda h: thumbnail(h.get("thumbnail", "")), hits))
+    return [{**h, "thumb_path": pth.replace("\\", "/")} for h, pth in zip(hits, paths)]
+
+
 def catalog() -> list[dict]:
     return list(_catalog().values())

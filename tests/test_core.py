@@ -1059,3 +1059,29 @@ def test_backup_of_unsaved_stage_has_a_valid_windows_name(tmp_path, monkeypatch)
         assert os.path.exists(r["path"]) and os.path.dirname(r["path"]) == str(tmp_path / ".simwright" / "backups")
     finally:
         kh._TEST_STAGE = None
+
+
+def test_simready_thumbnails_cached_and_validated(tmp_path, monkeypatch):
+    import io, urllib.error
+    from simwright import simready
+    monkeypatch.setattr(simready, "cache_root", lambda: tmp_path)
+    png = b"\x89PNG\r\n\x1a\n" + b"x" * 64
+    calls = []
+    class R(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+    def fake_open(req, timeout=0):
+        u = req.full_url; calls.append(u)
+        if u.endswith("missing.png"):
+            raise urllib.error.HTTPError(u, 404, "nf", {}, None)
+        return R(b"<html>not an image</html>" if u.endswith("html.png") else png)
+    monkeypatch.setattr(simready.urllib.request, "urlopen", fake_open)
+    base = "https://huggingface.co/datasets/o/d/resolve/r/a/.thumbs/256x256/"
+    p = simready.thumbnail(base + "ok.png")
+    assert p and open(p, "rb").read() == png
+    assert simready.thumbnail(base + "ok.png") == p and len(calls) == 1      # cached
+    assert simready.thumbnail(base + "missing.png") == ""
+    assert simready.thumbnail(base + "html.png") == ""
+    assert simready.thumbnail("https://example.com/x.png") == "" and len(calls) == 3   # never fetches non-HF hosts
+    hits = simready.with_thumbnails([{"thumbnail": base + "ok.png"}, {"thumbnail": base + "missing.png"}, {}])
+    assert hits[0]["thumb_path"] == p.replace("\\", "/") and hits[1]["thumb_path"] == "" and hits[2]["thumb_path"] == ""
