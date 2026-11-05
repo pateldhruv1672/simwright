@@ -102,7 +102,9 @@ class G1Teleop:
                 self._override(str(p.GetPath()), "physxScene:timeStepsPerSecond", self.physics_hz, Sdf.ValueTypeNames.UInt)
                 break
         self.rx = rokoko.Receiver(self.port, actor=self.actor)
+        import omni.kit.app
         self.sub = omni.physx.get_physx_interface().subscribe_physics_step_events(self._on_step)
+        self.upd = omni.kit.app.get_app().get_update_event_stream().create_subscription_to_pop(self._on_update, name="simwright.teleop.bind")
         self.t_start = time.time()
         tl.play()
         return self.status()
@@ -115,6 +117,12 @@ class G1Teleop:
         except Exception:
             pass
         self.sub = None
+        try:
+            if getattr(self, "upd", None) is not None:
+                self.upd.unsubscribe()
+        except Exception:
+            pass
+        self.upd = None
         omni.timeline.get_timeline_interface().stop()
         self._restore()
         if self.rx:
@@ -122,45 +130,96 @@ class G1Teleop:
         self.view = self.art = None
         return {"ok": True, "stopped": True, "restored": "world pin and physics rate back to the scene's values"}
 
+    def _get_sim_view(self):
+        """Isaac Sim 6 creates the physics views itself on Play (after attaching the stage and warming up);
+        use that shared view instead of creating our own."""
+        try:
+            from isaacsim.core.simulation_manager import SimulationManager
+            v = SimulationManager.get_physics_sim_view()
+            if v is not None:
+                return v, SimulationManager.get_backend()
+        except Exception as e:
+            self.last_bind_error = f"SimulationManager: {e}"
+        return None, None
+
     def _bind(self):
-        import omni.physics.tensors as pt
-        self.view = pt.create_simulation_view("numpy")
-        self.view.set_subspace_roots("/")
-        last = None
-        for path in (self.robot, self.robot.rsplit("/", 1)[0] + "/Geometry/pelvis"):
+        self.view, backend = self._get_sim_view()
+        if self.view is None:
+            return False
+        self.backend = backend or "torch"
+        if self.backend == "torch":
+            import torch
+            self.torch = torch
+        art = None; last = None
+        for path in (self.robot, self.robot.rsplit("/", 1)[0] + "/Geometry/pelvis", self.robot.rsplit("/", 1)[0] + "/pelvis"):
             try:
                 a = self.view.create_articulation_view(path)
                 if a is not None and a.count > 0:
-                    self.art = a; break
+                    art = a; break
             except Exception as e:
                 last = e
-        if self.art is None:
+        if art is None:
             raise RuntimeError(f"cannot bind articulation at {self.robot}: {last}")
+        self.art = art
+        q_raw = self.art.get_dof_positions(); g_raw = self.art.get_dof_stiffnesses()
+        self.dev = getattr(q_raw, "device", None); self.gdev = getattr(g_raw, "device", None)
         names = list(self.art.shared_metatype.dof_names)
         self.dof = {n: i for i, n in enumerate(names)}
         miss = [n for n in self.desc["joint_names"] if n not in self.dof]
         if miss:
+            self.art = None
             raise RuntimeError(f"robot is missing policy joints: {miss}")
         self.pol_idx = np.array([self.dof[n] for n in self.desc["joint_names"]])
         self.leg_idx = np.array([self.dof[n] for n in self.desc["leg_joint_names"]])
-        self.idx0 = np.array([0], dtype=np.int32)
-        n = len(names)
-        kp = self.art.get_dof_stiffnesses().copy(); kd = self.art.get_dof_dampings().copy()
+        self.idx0 = self.torch.tensor([0], dtype=self.torch.int32, device=self.dev) if self.backend == "torch" else np.array([0], dtype=np.int32)
+        kp = self._np(g_raw); kd = self._np(self.art.get_dof_dampings())
         kp[0, self.pol_idx] = self.desc["default_joint_stiffness"]; kd[0, self.pol_idx] = self.desc["default_joint_damping"]
-        self.art.set_dof_stiffnesses(kp.astype(np.float32), self.idx0); self.art.set_dof_dampings(kd.astype(np.float32), self.idx0)
-        self.targets = self.art.get_dof_position_targets().copy().astype(np.float32)
-        q = self.art.get_dof_positions().copy()
+        self.art.set_dof_stiffnesses(self._t(kp, gain=True), self.idx0); self.art.set_dof_dampings(self._t(kd, gain=True), self.idx0)
+        self.targets = self._np(self.art.get_dof_position_targets())
+        q = self._np(q_raw)
         q0 = np.array(self.desc["default_joint_pos"], np.float32)
         q[0, self.pol_idx] = q0; self.targets[0, self.pol_idx] = q0
-        self.art.set_dof_positions(q.astype(np.float32), self.idx0)
-        self.art.set_dof_velocities(np.zeros_like(q, dtype=np.float32), self.idx0)
-        self.art.set_dof_position_targets(self.targets, self.idx0)
+        self.art.set_dof_positions(self._t(q), self.idx0)
+        self.art.set_dof_velocities(self._t(np.zeros_like(q)), self.idx0)
+        self.art.set_dof_position_targets(self._t(self.targets), self.idx0)
         self.state = {k: v.copy() for k, v in self.init_state.items()}
+        self.bound_at = time.time(); self.bind_steps = self.steps
+        return True
+
+    def _np(self, x):
+        if hasattr(x, "detach"):
+            return x.detach().cpu().numpy().astype(np.float32).copy()
+        return np.array(x, dtype=np.float32, copy=True)
+
+    def _t(self, a, gain=False):
+        a = np.ascontiguousarray(a, dtype=np.float32)
+        if self.backend == "torch":
+            return self.torch.as_tensor(a, device=self.gdev if gain else self.dev)
+        return a
+
+    def _on_update(self, e):
+        """App-update tick (not a physics step): bind once the simulation is up; at most 2 tries/s, give up after 60."""
+        if self.art is not None or self.sub is None or getattr(self, "bind_gave_up", False):
+            return
+        now = time.time()
+        if now - getattr(self, "last_bind_try", 0.0) < 0.5:
+            return
+        self.last_bind_try = now
+        self.bind_tries = getattr(self, "bind_tries", 0) + 1
+        try:
+            import omni.timeline
+            if omni.timeline.get_timeline_interface().is_playing():
+                self._bind()
+        except Exception as ex:
+            self.last_bind_error = f"{type(ex).__name__}: {ex}"
+        if self.art is None and self.bind_tries >= 60:
+            self.bind_gave_up = True
+            self.errors = (self.errors + [f"could not bind the robot after 30 s: {getattr(self, 'last_bind_error', 'no physics view')}"])[-5:]
 
     # ---------- control ----------
     def _policy(self, cmd):
-        q = self.art.get_dof_positions()[0]; qd = self.art.get_dof_velocities()[0]
-        tr = self.art.get_root_transforms()[0]; vel = self.art.get_root_velocities()[0]
+        q = self._np(self.art.get_dof_positions())[0]; qd = self._np(self.art.get_dof_velocities())[0]
+        tr = self._np(self.art.get_root_transforms())[0]; vel = self._np(self.art.get_root_velocities())[0]
         Rw = _quat_to_mat(*tr[3:7])
         ang_b = Rw.T @ vel[3:6]
         feeds = {"base_velocity": np.array([[cmd["vx"], cmd["vy"], cmd["wz"], cmd["h"]]], np.float32),
@@ -173,9 +232,9 @@ class G1Teleop:
         for k in self.state:
             self.state[k] = out[k[:-3] + "_out"].astype(np.float32)
         if self.policy_steps == 0 or self.policy_steps % 50 == 0:
-            kp = self.art.get_dof_stiffnesses().copy(); kd = self.art.get_dof_dampings().copy()
+            kp = self._np(self.art.get_dof_stiffnesses()); kd = self._np(self.art.get_dof_dampings())
             kp[0, self.leg_idx] = out["joint_pos_kp_gains"][0]; kd[0, self.leg_idx] = out["joint_pos_kd_gains"][0]
-            self.art.set_dof_stiffnesses(kp.astype(np.float32), self.idx0); self.art.set_dof_dampings(kd.astype(np.float32), self.idx0)
+            self.art.set_dof_stiffnesses(self._t(kp, gain=True), self.idx0); self.art.set_dof_dampings(self._t(kd, gain=True), self.idx0)
         self.targets[0, self.leg_idx] = out["joint_pos"][0]
         up = Rw[:, 2]
         self.info = {**{k: v for k, v in self.info.items() if k in ("calibration", "arm_err_mm")}, "root_xy": [round(float(tr[0]), 3), round(float(tr[1]), 3)], "yaw_deg": round(math.degrees(math.atan2(Rw[1, 0], Rw[0, 0])), 1), "pelvis_z": round(float(tr[2]), 3), "tilt_deg": round(math.degrees(math.acos(max(-1, min(1, up[2])))), 1)}
@@ -186,7 +245,6 @@ class G1Teleop:
         try:
             self.steps += 1
             if self.art is None:
-                self._bind()
                 return
             if self.steps % self.decim:
                 return
@@ -210,16 +268,28 @@ class G1Teleop:
             if self.walk and not self.fallen:
                 self._policy(cmd)
                 self.policy_steps += 1
-            self.art.set_dof_position_targets(self.targets, self.idx0)
+            self.art.set_dof_position_targets(self._t(self.targets), self.idx0)
         except Exception as e:
-            self.errors = (self.errors + [f"{type(e).__name__}: {e} | {traceback.format_exc()[-400:]}"])[-5:]
+            msg = f"{type(e).__name__}: {e}"
+            self.err_count = getattr(self, "err_count", 0) + 1
+            if msg not in self.errors:
+                self.errors = (self.errors + [msg + " | " + traceback.format_exc()[-300:]])[-5:]
+            if self.err_count > 200:          # a persistent fault: stop driving the robot instead of erroring every step
+                self.walk = False; self.fault = msg
 
     def status(self):
         el = max(time.time() - self.t_start, 1e-6) if self.t_start else 0
-        return {"running": self.sub is not None, "robot": self.robot, "walk": self.walk, "physics_hz": self.physics_hz, "decimation": self.decim,
+        try:
+            import omni.timeline
+            sim_t = omni.timeline.get_timeline_interface().get_current_time()
+        except Exception:
+            sim_t = None
+        return {"running": self.sub is not None, "bound": self.art is not None, "sim_time": round(sim_t, 2) if sim_t is not None else None,
+                "wall_time": round(el, 2), "physics_hz_measured": round(self.steps / el, 1) if el else 0, "robot": self.robot, "walk": self.walk, "physics_hz": self.physics_hz, "decimation": self.decim,
                 "released_pins": getattr(self, "pins", []), "physics_steps": self.steps, "policy_steps": self.policy_steps,
                 "policy_hz": round(self.policy_steps / el, 1) if el else 0, "policy_ms": round(self.last_policy_ms, 2), "retarget_ms": round(self.last_retarget_ms, 2),
-                "rokoko": self.rx.status() if self.rx else None, "calibrated": self.retarget.cal is not None, "cmd": {k: round(v, 3) for k, v in self.cmd.items()},
+                "bind_tries": getattr(self, "bind_tries", 0), "bind_error": getattr(self, "last_bind_error", None), "backend": getattr(self, "backend", None),
+                "fault": getattr(self, "fault", None), "rokoko": self.rx.status() if self.rx else None, "calibrated": self.retarget.cal is not None, "cmd": {k: round(v, 3) for k, v in self.cmd.items()},
                 "manual": self.manual, "fallen": self.fallen, **self.info, "errors": self.errors}
 
 
