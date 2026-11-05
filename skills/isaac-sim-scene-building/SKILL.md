@@ -44,3 +44,9 @@ to a path recorded in SIMWRIGHT.md.
 - A mounted asset with its own rigid body would nest inside the link's rigid body; mount disables it so its colliders join the link.
 ## Never freeze Kit
 - Code sent to Isaac Sim runs on Kit's main thread: an unbounded loop over a big stage freezes the UI until it ends (a scan of a warehouse once hung it for over 20 minutes). Bound prim counts, check a time budget, prefer the built-in helpers (they stop on their own).
+
+## Physics checks without crashing
+- `isaac_physics_check` runs a preflight first and refuses to press Play on setups known to crash PhysX: CCD on a GPU scene (Isaac Sim's default is GPU dynamics, which has no CCD), articulation roots nested inside another robot (an xArm gripper with its own root under the arm), negative mass. Propose the fix and apply it with the user's approval; `force=true` only if they insist.
+- Never turn on CCD to "fix" tunnelling on a GPU scene; raise the solver iterations or the physics rate, or thicken thin colliders instead.
+- Every check backs up the stage (with unsaved edits) to `~/.simwright/backups/` before playing. If Isaac Sim dies, the result says `crashed: true` with the backup path: relaunch, open the backup, fix the preflight issues, then check again.
+

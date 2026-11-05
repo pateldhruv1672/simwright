@@ -16,6 +16,44 @@ def tool(desc: str):
     return deco
 
 
+def _pid_alive(pid: int) -> bool:
+    if not pid:
+        return False
+    if os.name == "nt":
+        import ctypes
+        h = ctypes.windll.kernel32.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        code = ctypes.c_ulong()
+        ok = ctypes.windll.kernel32.GetExitCodeProcess(h, ctypes.byref(code))
+        ctypes.windll.kernel32.CloseHandle(h)
+        return bool(ok) and code.value == 259  # STILL_ACTIVE
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except OSError:
+        return False
+
+
+def crash_report(wait: float = 0.0, marker: pathlib.Path | None = None) -> dict | None:
+    """If the last physics check never finished and its Isaac Sim process is gone, say so (with the backup)."""
+    f = marker or (pathlib.Path.home() / ".simwright" / "physics_check.json")
+    end = time.time() + wait
+    while True:
+        try:
+            m = json.loads(f.read_text())
+        except Exception:
+            return None
+        if m.get("state") != "running":
+            return None
+        if not _pid_alive(m.get("kit_pid", 0)):
+            return {"crash": "Isaac Sim exited during a physics check", "stage": m.get("stage"), "backup": m.get("backup"),
+                    "at": time.strftime("%Y-%m-%d %H:%M", time.localtime(m.get("started", 0)))}
+        if time.time() >= end:
+            return None
+        time.sleep(1)
+
+
 class Toolbox:
     def __init__(self, root: pathlib.Path, runner: Runner | None = None):
         self.root = root
@@ -216,7 +254,14 @@ class Toolbox:
             ping = self.kit.ping()
         except KitError as e:
             ping = {"ok": False, "error": str(e)}
-        return {"ok": True, "install": inst, "session": ping}
+        except (TimeoutError, OSError) as e:
+            ping = {"ok": False, "error": f"Isaac Sim is running but not responding ({type(e).__name__}): its main thread is busy "
+                    "(a long script or physics step) or hung. Wait, or close it if it stays like this; unsaved work would be lost."}
+        out = {"ok": True, "install": inst, "session": ping}
+        rep = crash_report()
+        if rep:
+            out["last_physics_check"] = rep
+        return out
 
     @tool("Launch Isaac Sim with the python_server and the Simwright extension (headless optional). Waits until the app is ready.")
     def isaac_launch(self, headless: bool = False) -> dict:
@@ -244,9 +289,24 @@ class Toolbox:
     def isaac_scene(self) -> dict:
         return {"ok": True, **self.kit.call("scene_summary()")}
 
-    @tool("Play the simulation for N seconds and verify physics: NaN poses, bodies through the floor, explosions, missing PhysicsScene, lighting.")
-    def isaac_physics_check(self, seconds: float = 3.0) -> dict:
-        return self.kit.call(f"await physics_check({float(seconds)})", timeout=seconds * 30 + 60)
+    @tool("Play the simulation for N seconds and verify physics: NaN poses, bodies through the floor, explosions, missing PhysicsScene, lighting. "
+          "First runs a preflight for setups known to crash PhysX (CCD on a GPU scene, nested articulation roots, negative mass) and refuses to "
+          "play while any are present unless force=true; backs up the stage with its unsaved edits before playing.")
+    def isaac_physics_check(self, seconds: float = 3.0, force: bool = False) -> dict:
+        prev = crash_report()
+        try:
+            r = self.kit.call(f"await physics_check({float(seconds)}, force={bool(force)})", timeout=seconds * 30 + 90)
+        except Exception as e:
+            rep = crash_report(wait=8)
+            if rep:
+                self.session.log({"type": "scene", "what": f"Isaac Sim crashed during a physics check; backup {rep.get('backup')}"})
+                return {"ok": False, "crashed": True, **rep,
+                        "next": "Relaunch Isaac Sim (simwright isaac launch), open the backup (it has the edits made before the crash), "
+                                "run isaac_scene and fix the preflight issues before playing again."}
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        if prev and isinstance(r, dict):
+            r["previous_crash"] = prev
+        return r
 
     @tool("Save a viewport screenshot (PNG) to a path on this machine.")
     def isaac_capture(self, path: str = ".simwright/captures/frame.png") -> dict:

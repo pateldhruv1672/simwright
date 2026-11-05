@@ -632,3 +632,48 @@ def test_serve_events_persist_across_restart(tmp_path, monkeypatch):
     kinds = [(e["type"], e.get("text")) for e in st2.events]
     assert ("user", "hello") in kinds and ("text", "hi there") in kinds and all(e.get("restored") for e in st2.events)
     assert [e["n"] for e in st2.events] == list(range(len(st2.events)))
+
+
+
+def test_physics_preflight_flags_crash_setups(tmp_path):
+    from pxr import UsdGeom, UsdPhysics, Sdf, Gf
+    kh, st = _helpers_with_stage()
+    try:
+        sc = UsdPhysics.Scene.Define(st, "/World/PhysicsScene").GetPrim()
+        assert kh.physics_preflight()["ok"]
+        sc.CreateAttribute("physxScene:enableCCD", Sdf.ValueTypeNames.Bool).Set(True)
+        r = kh.physics_preflight()
+        assert not r["ok"] and any("CCD" in i["issue"] for i in r["issues"])
+        sc.CreateAttribute("physxScene:enableGPUDynamics", Sdf.ValueTypeNames.Bool).Set(False)
+        sc.CreateAttribute("physxScene:broadphaseType", Sdf.ValueTypeNames.Token).Set("MBP")
+        assert kh.physics_preflight()["ok"]                      # CCD is fine on a CPU scene
+        # xArm-style: root on the arm's root_joint and again on the gripper's root_joint
+        for p in ("/World/Robots/XArm/root_joint", "/World/Robots/XArm/gripper/root_joint"):
+            j = UsdPhysics.FixedJoint.Define(st, p).GetPrim()
+            UsdPhysics.ArticulationRootAPI.Apply(j)
+        r = kh.physics_preflight()
+        assert not r["ok"] and any("nested" in i["issue"] and i["body"].endswith("/gripper") for i in r["issues"])
+        # separate robots side by side are fine
+        st.RemovePrim("/World/Robots/XArm/gripper")
+        j = UsdPhysics.FixedJoint.Define(st, "/World/Robots/XArm2/root_joint").GetPrim(); UsdPhysics.ArticulationRootAPI.Apply(j)
+        assert kh.physics_preflight()["ok"]
+        # triangle-mesh collider on a dynamic body is a warning, not a block
+        b = UsdGeom.Xform.Define(st, "/World/box").GetPrim(); UsdPhysics.RigidBodyAPI.Apply(b)
+        m = _box_mesh(st, "/World/box/geo", (0, 0, 0), (1, 1, 1)).GetPrim(); UsdPhysics.CollisionAPI.Apply(m)
+        r = kh.physics_preflight()
+        assert r["ok"] and any("triangle-mesh" in i["issue"] for i in r["issues"])
+    finally:
+        kh._TEST_STAGE = None
+
+
+def test_crash_report_detects_dead_kit(tmp_path):
+    import json as _j, os as _os
+    from simwright.tools import crash_report
+    f = tmp_path / "physics_check.json"
+    f.write_text(_j.dumps({"state": "running", "kit_pid": 999999, "backup": "/b/scene-x.usda", "stage": "/s/scene.usd", "started": 1}))
+    rep = crash_report(marker=f)
+    assert rep and rep["backup"] == "/b/scene-x.usda"
+    f.write_text(_j.dumps({"state": "running", "kit_pid": _os.getpid(), "started": 1}))
+    assert crash_report(marker=f) is None                      # still alive: not a crash
+    f.write_text(_j.dumps({"state": "done", "kit_pid": 999999}))
+    assert crash_report(marker=f) is None

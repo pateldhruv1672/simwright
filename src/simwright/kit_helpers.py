@@ -17,7 +17,7 @@ _TEST_STAGE = None
 _ASSET_CACHE = globals().get("_ASSET_CACHE") or {}
 
 
-HELPERS_VERSION = "0.3.0"
+HELPERS_VERSION = "0.3.1"
 
 
 def _stage():
@@ -87,7 +87,8 @@ def scene_summary(max_list=40):
 def _health_brief():
     try:
         h = stage_health()
-        return {"ok": h["ok"], "issues": h["issues"][:15], "articulations": h["articulations"]}
+        pf = physics_preflight()
+        return {"ok": h["ok"] and pf["ok"], "issues": (pf["issues"] + h["issues"])[:20], "articulations": h["articulations"]}
     except Exception as e:
         return {"ok": None, "error": str(e)}
 
@@ -199,23 +200,141 @@ def stage_health(max_prims=50000):
             "issues": issues, "note": "gravity (0,0,0) / negative magnitude are UsdPhysics defaults: Earth gravity along the negative up axis"}
 
 
-async def physics_check(seconds=3.0, floor_z=0.0, keep_playing=False):
-    """Play, step, and report bodies that went NaN, fell through the floor or flew away."""
+def _attr(p, name, default=None):
+    a = p.GetAttribute(name)
+    if a and a.HasAuthoredValue():
+        v = a.Get()
+        return default if v is None else v
+    return default
+
+
+def physics_preflight(max_prims=60000):
+    """Static checks for setups known to crash or destabilize PhysX, run before pressing Play.
+    severity 'crash-risk' blocks the physics check unless forced."""
+    st = _stage()
+    issues = []
+    scenes = [p for p in st.Traverse() if p.IsA(UsdPhysics.Scene)]
+    for sc in scenes:
+        gpu = bool(_attr(sc, "physxScene:enableGPUDynamics", True))          # PhysX scene default: GPU dynamics on
+        bp = str(_attr(sc, "physxScene:broadphaseType", "GPU"))
+        if bool(_attr(sc, "physxScene:enableCCD", False)) and (gpu or bp.upper() == "GPU"):
+            issues.append({"severity": "crash-risk", "body": str(sc.GetPath()),
+                           "issue": "CCD is enabled on a GPU PhysX scene (GPU dynamics / GPU broadphase do not support CCD)",
+                           "fix": f"set physxScene:enableCCD = False on {sc.GetPath()} (or switch the scene to CPU dynamics + MBP broadphase if you really need CCD)"})
+    if len(scenes) > 1:
+        issues.append({"severity": "warning", "issue": f"{len(scenes)} PhysicsScene prims: bodies may be split across scenes",
+                       "fix": "keep one PhysicsScene"})
+    roots, bodies, n = [], [], 0
+    pred = Usd.TraverseInstanceProxies(Usd.PrimAllPrimsPredicate)
+    for p in st.Traverse(pred):
+        n += 1
+        if n > max_prims:
+            issues.append({"severity": "warning", "issue": f"preflight stopped after {max_prims} prims"})
+            break
+        if p.HasAPI(UsdPhysics.ArticulationRootAPI):
+            roots.append(str(p.GetPath()))
+        if p.HasAPI(UsdPhysics.RigidBodyAPI) and _attr(p, "physics:rigidBodyEnabled", True):
+            bodies.append(p)
+            mass = _attr(p, "physics:mass", None)
+            if mass is not None and (mass < 0 or math.isnan(mass)):
+                issues.append({"severity": "crash-risk", "body": str(p.GetPath()), "issue": f"negative or NaN mass ({mass})", "fix": "set a positive mass or remove it to use density"})
+            if _attr(p, "physxRigidBody:enableCCD", False):
+                issues.append({"severity": "warning", "body": str(p.GetPath()), "issue": "per-body CCD on a GPU scene is ignored or unstable", "fix": "disable physxRigidBody:enableCCD"})
+            if not _attr(p, "physics:kinematicEnabled", False):
+                for d in Usd.PrimRange(p, pred):
+                    if d.IsA(UsdGeom.Mesh) and d.HasAPI(UsdPhysics.CollisionAPI):
+                        appr = _attr(d, "physics:approximation", "none")
+                        if appr in ("none", "meshSimplification"):
+                            issues.append({"severity": "warning", "body": str(d.GetPath()),
+                                           "issue": f"triangle-mesh collider ({appr}) on a dynamic body: PhysX cannot simulate it and falls back",
+                                           "fix": "use convexHull or convexDecomposition for moving parts"})
+                            break
+    # nested articulation roots: a second root inside another articulation's robot
+    def scope(path):
+        pr = st.GetPrimAtPath(path)
+        return str(pr.GetParent().GetPath()) if pr.IsA(UsdPhysics.Joint) and pr.GetParent() else path
+    scopes = sorted({scope(r) for r in roots}, key=len)
+    for i, a in enumerate(scopes):
+        for b in scopes[i + 1:]:
+            if b.startswith(a + "/"):
+                issues.append({"severity": "crash-risk", "body": b,
+                               "issue": f"articulation root nested inside the articulation at {a}",
+                               "fix": "keep one ArticulationRootAPI per robot: remove it from the inner prim (e.g. the gripper) and connect the gripper with a fixed joint, "
+                                      "or use the combined robot+gripper asset"})
+    # rigid bodies nested in rigid bodies without resetting the transform stack
+    bpaths = sorted(str(b.GetPath()) for b in bodies)
+    for i, a in enumerate(bpaths):
+        for b in bpaths[i + 1:i + 40]:
+            if b.startswith(a + "/"):
+                bp = st.GetPrimAtPath(b)
+                if not UsdGeom.Xformable(bp).GetResetXformStack():
+                    issues.append({"severity": "warning", "body": b, "issue": f"rigid body nested inside rigid body {a}",
+                                   "fix": "disable one of them, or make the inner one a child collider / connect them with a joint"})
+                break
+    if len(bodies) > 3000:
+        issues.append({"severity": "warning", "issue": f"{len(bodies)} rigid bodies: GPU contact buffers may overflow on a 16 GB laptop GPU",
+                       "fix": "make static props non-rigid (colliders only) and raise physxScene:gpuMaxRigidContactCount if needed"})
+    return {"ok": not any(i["severity"] == "crash-risk" for i in issues), "rigid_bodies": len(bodies), "articulation_roots": roots[:30], "issues": issues[:40]}
+
+
+def _marker_path():
+    return os.path.join(os.path.expanduser("~"), ".simwright", "physics_check.json")
+
+
+def _backup_stage(tag="physics-check"):
+    """Export the root layer (with unsaved edits) next to Simwright's state before anything risky."""
+    st = _stage()
+    lay = st.GetRootLayer()
+    base = os.path.splitext(os.path.basename(lay.realPath or lay.identifier or "anon"))[0] or "anon"
+    d = os.path.join(os.path.expanduser("~"), ".simwright", "backups")
+    os.makedirs(d, exist_ok=True)
+    keep = sorted(f for f in os.listdir(d) if f.startswith(base + "-"))
+    for old in keep[:-8]:  # keep the 8 newest per scene
+        try:
+            os.remove(os.path.join(d, old))
+        except OSError:
+            pass
+    ext = os.path.splitext(lay.realPath or "")[1] or ".usda"
+    path = os.path.join(d, f"{base}-{time.strftime('%Y%m%d-%H%M%S')}-{tag}{ext if ext in ('.usd', '.usda', '.usdc') else '.usda'}")
+    ok = lay.Export(path)
+    return {"path": path if ok else None, "dirty": bool(lay.dirty), "stage": lay.realPath or lay.identifier}
+
+
+async def physics_check(seconds=3.0, floor_z=0.0, keep_playing=False, force=False, backup=True):
+    """Play, step, and report bodies that went NaN, fell through the floor or flew away.
+    Before playing: preflight for known PhysX crash setups (blocks unless force=True) and a backup of the stage
+    with its unsaved edits; a marker file records the run so a crash is detected afterwards."""
+    import json as _json
     st = _stage()
     issues = []
     try:
         issues += stage_health()["issues"]
     except Exception as e:
         issues.append({"severity": "warning", "issue": f"static checks failed: {e}"})
+    pf = physics_preflight()
+    issues += pf["issues"]
     if not any(p.GetTypeName() == "PhysicsScene" for p in st.Traverse()):
         issues.append({"severity": "error", "issue": "no PhysicsScene prim: nothing will simulate",
                        "fix": "add a PhysicsScene (UsdPhysics.Scene.Define(stage, '/physicsScene'))"})
-    mpu = UsdGeom.GetStageMetersPerUnit(st) or 1.0
-    paths = _rigid_paths()
+    if not pf["ok"] and not force:
+        return {"ok": False, "played": False, "issues": issues[:40],
+                "note": "Not played: the scene has setups known to crash PhysX (severity crash-risk). Fix them, or rerun with force=True."}
+    bk = _backup_stage() if backup else {"path": None}
     tl = omni.timeline.get_timeline_interface()
     was_playing = tl.is_playing()
+    try:
+        os.makedirs(os.path.dirname(_marker_path()), exist_ok=True)
+        with open(_marker_path(), "w") as f:
+            _json.dump({"state": "running", "stage": bk.get("stage"), "backup": bk.get("path"), "kit_pid": os.getpid(),
+                        "started": time.time(), "seconds": seconds}, f)
+    except Exception:
+        pass
+    mpu = UsdGeom.GetStageMetersPerUnit(st) or 1.0
+    paths = _rigid_paths()
     start = {p: _pose(p) for p in paths}
     tl.play()
+    for _ in range(3):                      # let PhysX parse the stage before measuring
+        await _app().next_update_async()
     t0, frames = tl.get_current_time(), 0
     wall = time.time()
     while tl.get_current_time() - t0 < seconds and time.time() - wall < seconds * 20 + 30:
@@ -224,8 +343,17 @@ async def physics_check(seconds=3.0, floor_z=0.0, keep_playing=False):
     end = {p: _pose(p) for p in paths}
     sim_t = max(tl.get_current_time() - t0, 1e-6)
     if not keep_playing and not was_playing:
+        tl.pause()                          # finish the in-flight step before tearing PhysX down
+        for _ in range(2):
+            await _app().next_update_async()
         tl.stop()
-        await _app().next_update_async()
+        for _ in range(3):
+            await _app().next_update_async()
+    try:
+        with open(_marker_path(), "w") as f:
+            _json.dump({"state": "done", "stage": bk.get("stage"), "backup": bk.get("path"), "kit_pid": os.getpid(), "finished": time.time()}, f)
+    except Exception:
+        pass
     up = 2 if UsdGeom.GetStageUpAxis(st) == "Z" else 1
     for p in paths:
         a, b = start[p], end[p]
@@ -240,8 +368,8 @@ async def physics_check(seconds=3.0, floor_z=0.0, keep_playing=False):
         elif d / sim_t > 25:
             issues.append({"severity": "error", "body": p, "issue": f"moved {d:.1f} m in {sim_t:.1f} s (exploded)",
                            "fix": "interpenetrating colliders at spawn or bad inertia"})
-    return {"ok": not any(i["severity"] == "error" for i in issues), "bodies_checked": len(paths), "sim_seconds": round(sim_t, 2),
-            "frames": frames, "issues": issues[:40], "lights": light_check()}
+    return {"ok": not any(i["severity"] in ("error", "crash-risk") for i in issues), "played": True, "bodies_checked": len(paths),
+            "sim_seconds": round(sim_t, 2), "frames": frames, "issues": issues[:40], "lights": light_check(), "backup": bk.get("path")}
 
 
 async def capture(path, frames_before=4):
