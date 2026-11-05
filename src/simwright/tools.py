@@ -363,6 +363,15 @@ class Toolbox:
         started = False
         if play:
             started = bool(self.kit.call("(lambda tl: (not tl.is_playing()) and (tl.play() or True))(__import__('omni.timeline').timeline.get_timeline_interface())", timeout=60))
+            # big scenes take a while before the first physics step: wait until simulation time moves
+            import time as _t
+            t0 = self.kit.call("__import__('omni.timeline').timeline.get_timeline_interface().get_current_time()", timeout=30) or 0
+            deadline = _t.time() + 90
+            while _t.time() < deadline:
+                _t.sleep(2)
+                now = self.kit.call("__import__('omni.timeline').timeline.get_timeline_interface().get_current_time()", timeout=30) or 0
+                if now - t0 > 0.5:
+                    break
         topics = topics or ["/clock"]
         script = config.state_file("ros_bridge_check.sh")
         script.write_text(rosbridge.check_script(int(s_["domain_id"]), topics, seconds), encoding="utf-8", newline="\n")

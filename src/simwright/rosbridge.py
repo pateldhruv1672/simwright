@@ -103,13 +103,19 @@ def firewall_ps(domain: int) -> str:
 
 
 def check_script(domain: int, topics: list[str], seconds: int = 6) -> str:
-    """Bash for WSL / Linux: list topics, one /clock sample, rates. Prints one JSON line at the end."""
+    """Bash for WSL / Linux: wait for discovery, list topics, one /clock sample, rates. Prints one JSON line at the end."""
     ts = " ".join(topics)
+    first = topics[0] if topics else "/clock"
     return f"""#!/bin/bash
 source /opt/ros/${{ROS_DISTRO:-humble}}/setup.bash 2>/dev/null || source /opt/ros/*/setup.bash
 export ROS_DOMAIN_ID={int(domain)} RMW_IMPLEMENTATION=rmw_fastrtps_cpp FASTRTPS_DEFAULT_PROFILES_FILE=$HOME/.ros/fastdds.xml
 ros2 daemon stop >/dev/null 2>&1
-TOPICS=$(timeout 15 ros2 topic list 2>/dev/null | tr '\\n' ' ')
+TOPICS=""
+for i in 1 2 3 4 5 6; do   # discovery can take a few seconds after the publishers appear
+  TOPICS=$(timeout 8 ros2 topic list 2>/dev/null | tr '\\n' ' ')
+  case "$TOPICS" in *{first}*) break;; esac
+  sleep 2
+done
 CLOCK=$(timeout 10 ros2 topic echo /clock --once 2>/dev/null | grep -m1 'sec:' | tr -dc '0-9')
 RATES=""
 for t in {ts}; do r=$(timeout {seconds} ros2 topic hz $t 2>/dev/null | grep -m1 'average rate' | grep -oE '[0-9.]+'); RATES="$RATES\\"$t\\": \\"${{r:-0}}\\","; done
