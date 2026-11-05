@@ -1,13 +1,14 @@
-# Simwright installer for Windows (PowerShell 5.1 or 7). No admin needed.
-#   & ([scriptblock]::Create((irm '<url>/install.ps1'))) -Package '<url>/simwright-0.1.0-py3-none-any.whl'
+# Simwright installer for Windows (PowerShell 5.1 or 7). No admin rights needed.
+#   irm https://raw.githubusercontent.com/pateldhruv1672/simwright/main/install/install.ps1 | iex
+#   or, with a specific wheel:  & ([scriptblock]::Create((irm '<url>/install.ps1'))) -Package '<url>/simwright-X.Y.Z-py3-none-any.whl'
 param(
   [string]$Package = "",
-  [string]$Version = "0.1.0",
+  [string]$Ref = "main",
   [string]$Workspace = ""
 )
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
-Write-Host "Simwright $Version installer" -ForegroundColor Cyan
+Write-Host "Simwright installer" -ForegroundColor Cyan
 
 # 1. uv (manages Python and the simwright tool environment)
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
@@ -16,26 +17,32 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
   $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"
 }
 
-# 2. the simwright package
-$dist = Join-Path $env:USERPROFILE ".simwright\dist"
-New-Item -ItemType Directory -Force -Path $dist | Out-Null
+# 2. stop a running `simwright serve` (Windows cannot replace simwright.exe while it runs)
+$p = Get-NetTCPConnection -LocalPort 8787 -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique
+if ($p) { Write-Host "Stopping simwright serve (pid $p) for the upgrade"; Stop-Process -Id $p -Force; Start-Sleep 1 }
+
+# 3. the simwright package: a given wheel, else straight from GitHub
 if ($Package -match '^https?://') {
-  $whl = Join-Path $dist "simwright-$Version-py3-none-any.whl"
+  $dist = Join-Path $env:USERPROFILE ".simwright\dist"
+  New-Item -ItemType Directory -Force -Path $dist | Out-Null
+  $whl = Join-Path $dist ([IO.Path]::GetFileName(([Uri]$Package).AbsolutePath))
+  if ($whl -notmatch '\.whl$') { $whl = Join-Path $dist "simwright-0-py3-none-any.whl" }
   Write-Host "Downloading package..."
   Invoke-WebRequest -Uri $Package -OutFile $whl -UseBasicParsing
-} elseif ($Package) { $whl = (Resolve-Path $Package).Path } else { $whl = "simwright" }
-uv tool install --force --python 3.12 "$whl"
+  $src = $whl
+} elseif ($Package) { $src = (Resolve-Path $Package).Path }
+else { $src = "simwright @ git+https://github.com/pateldhruv1672/simwright@$Ref" }
+uv tool install --force --python 3.12 "$src"
 uv tool update-shell | Out-Null
 $sw = Join-Path $env:USERPROFILE ".local\bin\simwright.exe"
 
-# 3. environment report
+# 4. environment report
 Write-Host ""
 & $sw doctor
 Write-Host ""
 Write-Host "Next steps" -ForegroundColor Cyan
-Write-Host "  cd <your robot workspace>; simwright init        # writes SIMWRIGHT.md"
-Write-Host "  simwright                                         # interactive copilot (set SIMWRIGHT_API_KEY for standalone use)"
-Write-Host "  simwright isaac launch                            # Isaac Sim + python_server + Simwright panel"
-Write-Host "  claude mcp add simwright -- simwright-mcp --root <workspace>   # use from Claude Code / Cursor"
-Write-Host "  In Mana: pair this PC with Mana Bridge, then type 'mana' in your workspace to drive Simwright from chat."
+Write-Host "  cd <your robot workspace>; simwright init       # scans the workspace, writes SIMWRIGHT.md"
+Write-Host "  simwright connect claude                         # or: codex | cursor | vscode | claude-desktop | chatgpt"
+Write-Host "  simwright isaac launch                           # Isaac Sim + python_server + Simwright panel"
+Write-Host "  simwright                                        # built-in terminal copilot (needs SIMWRIGHT_API_KEY)"
 if ($Workspace) { Push-Location $Workspace; & $sw init; Pop-Location }

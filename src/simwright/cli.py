@@ -8,7 +8,8 @@
   simwright isaac launch    start Isaac Sim with the python_server + Simwright panel
   simwright lab train TASK  train a policy in Isaac Lab (background job)
   simwright world spec.json compose a room and build it in Isaac Sim
-  simwright mcp             MCP server for Claude Code / Cursor / Codex
+  simwright mcp [--http --tunnel]   MCP server (stdio for Claude Code / Codex / Cursor; HTTP for ChatGPT)
+  simwright connect CLIENT  register with claude | codex | cursor | vscode | claude-desktop | chatgpt
   simwright status --json   machine summary (used by the Mana console)
 """
 from __future__ import annotations
@@ -273,7 +274,12 @@ def main(argv=None):
     sub.add_parser("status").add_argument("--json", action="store_true")
     p = sub.add_parser("config"); p.add_argument("key", nargs="?"); p.add_argument("value", nargs="?")
     sub.add_parser("targets")
-    sub.add_parser("mcp")
+    p = sub.add_parser("mcp", help="MCP server (stdio; --http for ChatGPT)")
+    p.add_argument("--http", action="store_true"); p.add_argument("--tunnel", action="store_true"); p.add_argument("--read-only", action="store_true")
+    p.add_argument("--port", type=int, default=8765); p.add_argument("--host", default="127.0.0.1"); p.add_argument("--new-token", action="store_true")
+    p = sub.add_parser("connect", help="register Simwright with claude | codex | cursor | vscode | claude-desktop | chatgpt")
+    p.add_argument("client", choices=["claude", "codex", "cursor", "vscode", "claude-desktop", "chatgpt"])
+    p.add_argument("--read-only", action="store_true"); p.add_argument("--print", dest="print_only", action="store_true")
     p = sub.add_parser("serve"); p.add_argument("--port", type=int)
     p = sub.add_parser("chat"); p.add_argument("prompt", nargs="+"); p.add_argument("--mode", default=None)
     for name in ("ros", "urdf", "build", "mujoco", "gazebo", "isaac", "world", "lab", "simready"):
@@ -303,7 +309,12 @@ def main(argv=None):
         return _out(config.load()["targets"])
     if a.cmd == "mcp":
         from .mcp_server import main as mcp_main
-        return mcp_main(["--root", str(root)])
+        extra = (["--http"] if a.http else []) + (["--tunnel"] if a.tunnel else []) + (["--read-only"] if a.read_only else []) \
+            + (["--new-token"] if a.new_token else []) + ["--port", str(a.port), "--host", a.host]
+        return mcp_main(["--root", str(root), *extra])
+    if a.cmd == "connect":
+        from .connect import connect
+        return _out(connect(a.client, root, a.read_only, a.print_only))
     if a.cmd == "serve":
         from .serve import serve
         return serve(root, a.port)

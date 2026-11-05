@@ -264,7 +264,7 @@ def test_tool_schemas_and_mcp(tmp_path):
     assert v["ok"]
     from simwright.mcp_server import build
     import asyncio
-    mcp, _ = build(make_ws(tmp_path / "b"))
+    mcp, _, _ = build(make_ws(tmp_path / "b"))
     names = {t.name for t in asyncio.run(mcp.list_tools())}
     assert {"ros2_graph", "isaac_physics_check", "lab_train", "world_compose", "skill_add"} <= names
 
@@ -367,3 +367,51 @@ def test_every_module_imports():
     for m in pkgutil.iter_modules(simwright.__path__):
         if m.name not in ("kit_helpers",):
             importlib.import_module(f"simwright.{m.name}")
+
+
+def test_connect_writers(tmp_path, monkeypatch):
+    from simwright import connect
+    monkeypatch.setattr(connect, "server_command", lambda root, ro=False: ("C:/Users/me/.local/bin/simwright-mcp.exe", ["--root", str(root)] + (["--read-only"] if ro else [])))
+    home, root = tmp_path / "home", tmp_path / "ws"
+    (home / ".codex").mkdir(parents=True); root.mkdir()
+    (home / ".codex" / "config.toml").write_text('model = "gpt-5.4"\n\n[mcp_servers.other]\ncommand = "x"\n\n[mcp_servers.simwright]\ncommand = "old"\n\n[mcp_servers.simwright.env]\nA = "1"\n\n[profiles.fast]\nmodel = "m"\n')
+    for _ in range(2):  # idempotent
+        r = connect.connect("codex", root, home=home)
+    txt = (home / ".codex" / "config.toml").read_text()
+    import tomllib
+    cfg = tomllib.loads(txt)
+    assert cfg["mcp_servers"]["other"]["command"] == "x" and cfg["profiles"]["fast"]["model"] == "m" and cfg["model"] == "gpt-5.4"
+    assert cfg["mcp_servers"]["simwright"]["command"].endswith("simwright-mcp.exe") and cfg["mcp_servers"]["simwright"]["tool_timeout_sec"] == 900
+    assert "env" not in cfg["mcp_servers"]["simwright"] and txt.count("[mcp_servers.simwright]") == 1
+    assert (home / ".codex" / "config.toml.bak").exists()
+    (home / ".cursor").mkdir()
+    (home / ".cursor" / "mcp.json").write_text(json.dumps({"mcpServers": {"github": {"command": "gh"}}}))
+    connect.connect("cursor", root, read_only=True, home=home)
+    cj = json.loads((home / ".cursor" / "mcp.json").read_text())
+    assert cj["mcpServers"]["github"] == {"command": "gh"} and cj["mcpServers"]["simwright"]["args"][-1] == "--read-only"
+    connect.connect("vscode", root, home=home)
+    assert json.loads((root / ".vscode" / "mcp.json").read_text())["servers"]["simwright"]["type"] == "stdio"
+    assert "Developer mode" in connect.connect("chatgpt", root, home=home)["then"]
+
+
+def test_mcp_http_guard_and_annotations(tmp_path, monkeypatch):
+    from starlette.testclient import TestClient
+    from simwright import mcp_server
+    monkeypatch.setattr(config, "HOME", tmp_path)
+    mcp, _, names = mcp_server.build(tmp_path)
+    ro = mcp_server.build(tmp_path, read_only=True)[2]
+    assert set(ro) <= mcp_server.READ_ONLY and "run_command" not in ro and "run_command" in names
+    assert mcp_server._annotations("run_command").destructive_hint and mcp_server._annotations("read_file").read_only_hint
+    tok = mcp_server.http_token()
+    assert mcp_server.http_token() == tok and mcp_server.http_token(rotate=True) != tok
+    tok = mcp_server.http_token()
+    init = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+            "clientInfo": {"name": "t", "version": "1"}}}
+    hdr = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
+    with TestClient(mcp_server.http_app(mcp, tok), base_url="https://abc-def.trycloudflare.com") as c:
+        assert c.get("/healthz").status_code == 200
+        assert c.post("/mcp", json=init, headers=hdr).status_code == 401
+        assert c.post("/t/nope/mcp", json=init, headers=hdr).status_code == 401
+        assert c.post(f"/t/{tok}/mcp", json=init, headers=hdr).status_code == 200
+        assert c.post("/mcp", json=init, headers={**hdr, "Authorization": f"Bearer {tok}"}).status_code == 200
+        assert c.post(f"/mcp?token={tok}", json=init, headers=hdr).status_code == 200

@@ -9,7 +9,7 @@ description = "AI copilot for robot simulation: Isaac Sim, Isaac Lab, ROS 2, Gaz
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
-dependencies = ["openai>=1.40", "mcp>=1.2"]
+dependencies = ["openai>=1.40", "mcp>=1.10"]
 
 [project.scripts]
 simwright = "simwright.cli:main"
