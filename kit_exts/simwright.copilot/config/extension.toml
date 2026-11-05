@@ -1,0 +1,19 @@
+[package]
+version = "0.1.0"
+title = "Simwright Copilot"
+description = "AI copilot for robot simulation: a prompt panel inside Isaac Sim plus scene, physics and capture helpers used by Simwright."
+category = "Simulation"
+keywords = ["ai", "copilot", "robotics", "isaac", "mcp"]
+authors = ["Simwright"]
+repository = ""
+readme = "docs/README.md"
+
+[dependencies]
+"isaacsim.code_editor.python_server" = { optional = true }
+"omni.ui" = { optional = true }
+
+[[python.module]]
+name = "simwright.copilot"
+
+[settings]
+exts."simwright.copilot".serve_file = ""
