@@ -17,7 +17,7 @@ _TEST_STAGE = None
 _ASSET_CACHE = globals().get("_ASSET_CACHE") or {}
 
 
-HELPERS_VERSION = "0.3.4"
+HELPERS_VERSION = "0.4.0"
 
 
 def _stage():
@@ -406,6 +406,185 @@ def physics_repair(scope="/World", apply=False, mass_floor=0.02, solver=(32, 4),
 def backup_stage(tag="manual"):
     """Public alias: `from helpers import *` skips underscore names."""
     return _backup_stage(tag)
+
+
+# ---------------- ROS 2 bridge ----------------
+def ros_bridge_enable(distro="humble", domain_id=None, profile=None, isaac_dir=None):
+    """Point this Isaac Sim process at its bundled ROS 2 libraries and enable isaacsim.ros2.bridge.
+    On Windows the process environment (PATH, RMW, Fast DDS profile, domain) can still be set at runtime; on Linux
+    LD_LIBRARY_PATH cannot, so launch with `simwright isaac launch --ros` there."""
+    import omni.kit.app
+    em = omni.kit.app.get_app().get_extension_manager()
+    core = None
+    for e in em.get_extensions():
+        if e.get("name") == "isaacsim.ros2.core" and e.get("path"):
+            core = e["path"]
+            break
+    if not core and isaac_dir:
+        core = os.path.join(isaac_dir, "exts", "isaacsim.ros2.core")
+    lib = os.path.join(core, distro, "lib") if core else None
+    already = em.is_extension_enabled("isaacsim.ros2.bridge")
+    env_before = {k: os.environ.get(k) for k in ("ROS_DISTRO", "RMW_IMPLEMENTATION", "ROS_DOMAIN_ID", "FASTRTPS_DEFAULT_PROFILES_FILE")}
+    os.environ["ROS_DISTRO"] = distro
+    os.environ.setdefault("RMW_IMPLEMENTATION", "rmw_fastrtps_cpp")
+    if os.environ.get("RMW_IMPLEMENTATION") != "rmw_fastrtps_cpp":
+        os.environ["RMW_IMPLEMENTATION"] = "rmw_fastrtps_cpp"
+    if profile:
+        os.environ["FASTRTPS_DEFAULT_PROFILES_FILE"] = profile
+    if domain_id is not None:
+        os.environ["ROS_DOMAIN_ID"] = str(int(domain_id))
+    if lib and os.path.isdir(lib) and os.name == "nt":
+        if lib.lower() not in os.environ.get("PATH", "").lower():
+            os.environ["PATH"] = lib + ";" + os.environ.get("PATH", "")
+        try:
+            os.add_dll_directory(lib)
+        except Exception:
+            pass
+    ok = em.set_extension_enabled_immediate("isaacsim.ros2.bridge", True)
+    import omni.graph.core as og
+    have = bool(og.get_node_type("isaacsim.ros2.bridge.ROS2PublishClock"))
+    out = {"ok": bool(ok and have), "bridge_enabled": em.is_extension_enabled("isaacsim.ros2.bridge"), "node_types": have,
+           "distro": distro, "domain_id": os.environ.get("ROS_DOMAIN_ID", "0"), "profile": os.environ.get("FASTRTPS_DEFAULT_PROFILES_FILE"),
+           "lib": lib, "was_enabled": already}
+    if already and env_before.get("ROS_DISTRO") not in (None, distro):
+        out["warning"] = f"the bridge was already running with ROS_DISTRO={env_before.get('ROS_DISTRO')}: restart Isaac Sim with `simwright isaac launch --ros` to switch"
+    return out
+
+
+def _ros_name(path):
+    n = path.rstrip("/").split("/")[-1]
+    n = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", n).lower()
+    return re.sub(r"[^a-z0-9_]+", "_", n).strip("_") or "robot"
+
+
+def _robot_of(root_path):
+    """The robot's own prim for an articulation root (NVIDIA assets put the root on .../root_joint or .../Geometry)."""
+    st = _stage()
+    p = st.GetPrimAtPath(root_path)
+    while p and p.GetParent() and (p.IsA(UsdPhysics.Joint) or p.GetName() in ("Geometry", "geometry", "root_joint", "base_link")):
+        p = p.GetParent()
+    return p
+
+
+def ros_bridge_graph(robots=None, clock=True, joint_states=True, joint_commands=True, tf=True, cameras=None,
+                     domain_id=None, graph_path="/World/SimwrightROS", persist=False, width=640, height=480, camera_hz_skip=1):
+    """Build an Action Graph that connects the open stage to ROS 2:
+    /clock; per robot /<robot>/joint_states (and /<robot>/joint_command -> articulation controller); /tf for every robot;
+    optional cameras (list of camera prim paths) -> /<camera>/rgb + camera_info. robots: articulation root paths
+    (default: every articulation). persist=False puts the graph on the session layer (the scene file is unchanged)."""
+    import omni.graph.core as og
+    st = _stage()
+    smpu = UsdGeom.GetStageMetersPerUnit(st) or 1.0
+    if not og.get_node_type("isaacsim.ros2.bridge.ROS2PublishClock"):
+        return {"ok": False, "error": "the ROS 2 bridge is not enabled in this Isaac Sim: run ros_bridge_enable() (simwright ros bridge enable)"}
+    if robots is None:
+        robots = [str(p.GetPath()) for p in st.Traverse() if p.HasAPI(UsdPhysics.ArticulationRootAPI)]
+    cameras = list(cameras or [])
+    K = og.Controller.Keys
+    layer = st.GetRootLayer() if persist else st.GetSessionLayer()
+    nodes, values, connects, topics, skipped = [], [], [], [], []
+    with Usd.EditContext(st, layer):
+        if st.GetPrimAtPath(graph_path):
+            st.RemovePrim(graph_path)
+        nodes += [("tick", "omni.graph.action.OnPlaybackTick"), ("time", "isaacsim.core.nodes.IsaacReadSimulationTime"),
+                  ("ctx", "isaacsim.ros2.bridge.ROS2Context")]
+        if domain_id is not None:
+            values += [("ctx.inputs:useDomainIDEnvVar", False), ("ctx.inputs:domain_id", int(domain_id))]
+        if clock:
+            nodes.append(("clock", "isaacsim.ros2.bridge.ROS2PublishClock"))
+            connects += [("tick.outputs:tick", "clock.inputs:execIn"), ("time.outputs:simulationTime", "clock.inputs:timeStamp"),
+                         ("ctx.outputs:context", "clock.inputs:context")]
+            topics.append({"topic": "/clock", "type": "rosgraph_msgs/msg/Clock", "dir": "out"})
+        names = {}
+        for i, r in enumerate(robots):
+            rp = st.GetPrimAtPath(r)
+            if not rp or not rp.IsValid():
+                skipped.append({"robot": r, "why": "prim not found"})
+                continue
+            robot = _robot_of(r)
+            nm = _ros_name(str(robot.GetPath()))
+            while nm in names.values():
+                nm += "_%d" % i
+            names[r] = nm
+            if joint_states:
+                nodes.append((f"js{i}", "isaacsim.ros2.bridge.ROS2PublishJointState"))
+                values += [(f"js{i}.inputs:topicName", f"/{nm}/joint_states"), (f"js{i}.inputs:stageMetersPerUnit", float(smpu))]
+                connects += [("tick.outputs:tick", f"js{i}.inputs:execIn"), ("time.outputs:simulationTime", f"js{i}.inputs:timeStamp"),
+                             ("ctx.outputs:context", f"js{i}.inputs:context")]
+                topics.append({"topic": f"/{nm}/joint_states", "type": "sensor_msgs/msg/JointState", "dir": "out", "robot": r})
+            if joint_commands:
+                nodes += [(f"sub{i}", "isaacsim.ros2.bridge.ROS2SubscribeJointState"), (f"art{i}", "isaacsim.core.nodes.IsaacArticulationController")]
+                values += [(f"sub{i}.inputs:topicName", f"/{nm}/joint_command")]
+                connects += [("tick.outputs:tick", f"sub{i}.inputs:execIn"), ("ctx.outputs:context", f"sub{i}.inputs:context"),
+                             ("tick.outputs:tick", f"art{i}.inputs:execIn"),
+                             (f"sub{i}.outputs:jointNames", f"art{i}.inputs:jointNames"),
+                             (f"sub{i}.outputs:positionCommand", f"art{i}.inputs:positionCommand"),
+                             (f"sub{i}.outputs:velocityCommand", f"art{i}.inputs:velocityCommand"),
+                             (f"sub{i}.outputs:effortCommand", f"art{i}.inputs:effortCommand")]
+                topics.append({"topic": f"/{nm}/joint_command", "type": "sensor_msgs/msg/JointState", "dir": "in", "robot": r})
+        if tf and names:
+            nodes.append(("tf", "isaacsim.ros2.bridge.ROS2PublishTransformTree"))
+            connects += [("tick.outputs:tick", "tf.inputs:execIn"), ("time.outputs:simulationTime", "tf.inputs:timeStamp"),
+                         ("ctx.outputs:context", "tf.inputs:context")]
+            topics.append({"topic": "/tf", "type": "tf2_msgs/msg/TFMessage", "dir": "out"})
+        for j, cam in enumerate(cameras):
+            cp = st.GetPrimAtPath(cam)
+            if not cp or not cp.IsA(UsdGeom.Camera):
+                skipped.append({"camera": cam, "why": "not a Camera prim"})
+                continue
+            cn = _ros_name(cam)
+            nodes += [(f"rp{j}", "isaacsim.core.nodes.IsaacCreateRenderProduct"), (f"rgb{j}", "isaacsim.ros2.bridge.ROS2CameraHelper"),
+                      (f"info{j}", "isaacsim.ros2.bridge.ROS2CameraHelper")]
+            values += [(f"rp{j}.inputs:width", int(width)), (f"rp{j}.inputs:height", int(height)),
+                       (f"rgb{j}.inputs:type", "rgb"), (f"rgb{j}.inputs:topicName", f"/{cn}/rgb"), (f"rgb{j}.inputs:frameId", cn),
+                       (f"rgb{j}.inputs:frameSkipCount", int(camera_hz_skip)),
+                       (f"info{j}.inputs:type", "camera_info"), (f"info{j}.inputs:topicName", f"/{cn}/camera_info"), (f"info{j}.inputs:frameId", cn)]
+            connects += [("tick.outputs:tick", f"rp{j}.inputs:execIn"), (f"rp{j}.outputs:execOut", f"rgb{j}.inputs:execIn"),
+                         (f"rp{j}.outputs:execOut", f"info{j}.inputs:execIn"), (f"rp{j}.outputs:renderProductPath", f"rgb{j}.inputs:renderProductPath"),
+                         (f"rp{j}.outputs:renderProductPath", f"info{j}.inputs:renderProductPath"),
+                         ("ctx.outputs:context", f"rgb{j}.inputs:context"), ("ctx.outputs:context", f"info{j}.inputs:context")]
+            topics += [{"topic": f"/{cn}/rgb", "type": "sensor_msgs/msg/Image", "dir": "out", "camera": cam},
+                       {"topic": f"/{cn}/camera_info", "type": "sensor_msgs/msg/CameraInfo", "dir": "out", "camera": cam}]
+        og.Controller.edit({"graph_path": graph_path, "evaluator_name": "execution"}, {K.CREATE_NODES: nodes})
+        missing = []
+        for addr, val in values:
+            node, attr = addr.split(".", 1)
+            n = og.Controller.node(f"{graph_path}/{node}")
+            if n.get_attribute_exists(attr):
+                og.Controller.set(og.Controller.attribute(f"{graph_path}/{node}.{attr}"), val)
+            else:
+                missing.append(addr)
+        ok_conn = []
+        for a, b in connects:
+            try:
+                og.Controller.connect(f"{graph_path}/{a}", f"{graph_path}/{b}")
+                ok_conn.append(1)
+            except Exception as e:
+                missing.append(f"{a}->{b}: {e}")
+        # relationship targets (articulations, TF prims, cameras) after the nodes exist
+        for i, r in enumerate(robots):
+            if r not in names:
+                continue
+            for node in ([f"js{i}"] if joint_states else []) + ([f"art{i}"] if joint_commands else []):
+                rel = st.GetPrimAtPath(f"{graph_path}/{node}").GetRelationship("inputs:targetPrim")
+                if rel:
+                    rel.SetTargets([Sdf.Path(r)])
+                else:
+                    missing.append(f"{node}.inputs:targetPrim")
+        if tf and names:
+            rel = st.GetPrimAtPath(f"{graph_path}/tf").GetRelationship("inputs:targetPrims")
+            if rel:
+                rel.SetTargets([_robot_of(r).GetPath() for r in names])
+            else:
+                missing.append("tf.inputs:targetPrims")
+        for j, cam in enumerate(cameras):
+            rel = st.GetPrimAtPath(f"{graph_path}/rp{j}").GetRelationship("inputs:cameraPrim")
+            if rel:
+                rel.SetTargets([Sdf.Path(cam)])
+    return {"ok": not missing, "graph": graph_path, "layer": "scene file" if persist else "session (not saved)",
+            "domain_id": domain_id if domain_id is not None else os.environ.get("ROS_DOMAIN_ID", "0"),
+            "topics": topics, "robots": names, "skipped": skipped, "problems": missing[:30],
+            "note": "topics publish while the simulation is playing"}
 
 
 def _marker_path():
