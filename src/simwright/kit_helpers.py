@@ -287,6 +287,15 @@ DRIVE_PROFILES = [
 ]
 
 
+def _is_mimic(p):
+    names = [str(a) for a in p.GetAppliedSchemas()]
+    lo = p.GetMetadata("apiSchemas")
+    if lo is not None:
+        for attr in ("explicitItems", "prependedItems", "appendedItems", "addedItems"):
+            names += [str(x) for x in (getattr(lo, attr, None) or [])]
+    return any("Mimic" in n for n in names) or any("mimic" in a.GetName().lower() for a in p.GetAuthoredAttributes())
+
+
 def _profile(name):
     for rx, v in DRIVE_PROFILES:
         if rx.search(name):
@@ -355,7 +364,7 @@ def physics_repair(scope="/World", apply=False, mass_floor=0.02, solver=(32, 4),
         if time.time() - t0 > budget_s:
             truncated = True
             break
-        if (p.IsA(UsdPhysics.RevoluteJoint) or p.IsA(UsdPhysics.PrismaticJoint)) and not any("Mimic" in str(a) for a in p.GetAppliedSchemas()):
+        if (p.IsA(UsdPhysics.RevoluteJoint) or p.IsA(UsdPhysics.PrismaticJoint)) and not _is_mimic(p):
             # mimic followers copy another joint: a drive on them fights the mimic constraint
             kind = "angular" if p.IsA(UsdPhysics.RevoluteJoint) else "linear"
             k = _attr(p, f"drive:{kind}:physics:stiffness", 0.0) or 0.0
