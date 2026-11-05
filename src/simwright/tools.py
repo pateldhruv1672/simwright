@@ -5,7 +5,8 @@ from . import config, colcon, lab as labmod, ros2, sims, skills, urdf, world
 from .isaac import KitClient, KitError, find_isaac_sim, frames_to_mp4, launch as kit_launch
 from .memory import ProjectMemory, Session
 from . import docs as docsmod
-from .targets import Runner, Target
+from . import rosbridge
+from .targets import to_wsl_path, Runner, Target
 
 TOOLS: dict[str, str] = {}
 
@@ -265,10 +266,10 @@ class Toolbox:
         return out
 
     @tool("Launch Isaac Sim with the python_server and the Simwright extension (headless optional). Waits until the app is ready.")
-    def isaac_launch(self, headless: bool = False) -> dict:
-        if self.runner.approver.decide("host", "launch Isaac Sim" + (" headless" if headless else ""), "") != "run":
+    def isaac_launch(self, headless: bool = False, ros: bool = None) -> dict:
+        if self.runner.approver.decide("host", "launch Isaac Sim" + (" headless" if headless else "") + (" with the ROS 2 bridge" if ros else ""), "") != "run":
             return {"ok": False, "skipped": True}
-        s = kit_launch(headless=headless)
+        s = kit_launch(headless=headless, ros=ros)
         self.kit = KitClient.from_config()
         return {"ok": bool(s.get("ready")), **{k: v for k, v in s.items() if k != "token"}}
 
@@ -313,6 +314,67 @@ class Toolbox:
     def isaac_capture(self, path: str = ".simwright/captures/frame.png") -> dict:
         p = str(self._out(path)).replace("\\", "/")
         return self.kit.call(f"await capture({json.dumps(p)})", timeout=180)
+
+    # ---------- ROS 2 bridge (Isaac Sim <-> ROS 2 in WSL / Linux) ----------
+    @tool("One-time ROS 2 bridge setup between Isaac Sim on this PC and ROS 2 in WSL: Fast DDS UDP profile with unicast "
+          "discovery on both sides, matching ROS_DOMAIN_ID (taken from WSL's ~/.bashrc unless given), a removable block in "
+          "WSL's ~/.bashrc, and (Windows, admin) a Hyper-V firewall rule letting that domain's DDS ports into WSL from this PC only. "
+          "Afterwards `isaac_launch` starts Isaac Sim with the bridge.")
+    def ros_bridge_setup(self, domain_id: int = -1, distro: str = "humble") -> dict:
+        prof = config.state_file("fastdds.xml")
+        prof.parent.mkdir(parents=True, exist_ok=True)
+        prof.write_text(rosbridge.profile_xml(), encoding="utf-8")
+        steps = []
+        dom = None if domain_id is None or domain_id < 0 else int(domain_id)
+        if dom is None:
+            r = self.runner.capture("cat ~/.bashrc", target="wsl", description="read ROS_DOMAIN_ID from WSL's ~/.bashrc")
+            dom = rosbridge.wsl_domain_from_bashrc(r.out) if r.ok else None
+            dom = 0 if dom is None else dom
+        script = config.state_file("ros_bridge_wsl_setup.sh")
+        script.write_text(rosbridge.wsl_setup_script(to_wsl_path(str(prof)), None), encoding="utf-8", newline="\n")
+        r = self.runner.run(f"bash {to_wsl_path(str(script))}", "wsl", description="copy the Fast DDS profile into WSL; add the simwright ros bridge block to ~/.bashrc")
+        steps.append({"step": "wsl profile + ~/.bashrc", "ok": r.ok, "out": r.out[-300:]})
+        if os.name == "nt":
+            r = self.runner.run(rosbridge.firewall_ps(dom), "host", description=f"Hyper-V firewall: allow DDS ports for ROS domain {dom} into WSL from this PC only (needs admin)")
+            steps.append({"step": "hyper-v firewall", "ok": r.ok, "out": r.out[-300:],
+                          **({} if r.ok else {"fix": "run this terminal as administrator and repeat, or ask an admin to run: " + rosbridge.firewall_ps(dom)})})
+        config.set_value("ros_bridge", {"distro": distro, "domain_id": dom, "profile": str(prof)})
+        return {"ok": all(s_["ok"] for s_ in steps), "domain_id": dom, "distro": distro, "profile": str(prof), "steps": steps,
+                "next": "restart Isaac Sim with isaac_launch (it now starts with the ROS 2 bridge), then ros_bridge_graph and ros_bridge_check"}
+
+    @tool("Connect the open Isaac Sim stage to ROS 2: /clock, /<robot>/joint_states and /<robot>/joint_command for every "
+          "articulation (or the given articulation root paths), /tf, and optional cameras (/<camera>/rgb + camera_info). "
+          "persist=false keeps the graph out of the scene file. Enables the bridge first if needed.")
+    def ros_bridge_graph(self, robots: list = None, cameras: list = None, persist: bool = False, tf: bool = True, joint_commands: bool = True) -> dict:
+        s_ = rosbridge.settings()
+        en = self.kit.call(f"ros_bridge_enable({json.dumps(s_['distro'])}, {int(s_['domain_id'])}, {json.dumps(s_['profile'])})", timeout=180)
+        if not en.get("ok"):
+            return {"ok": False, "enable": en}
+        r = self.kit.call(f"ros_bridge_graph({json.dumps(robots)}, True, True, {bool(joint_commands)}, {bool(tf)}, {json.dumps(cameras or [])}, "
+                          f"{int(s_['domain_id'])}, persist={bool(persist)})", timeout=180)
+        if isinstance(r, dict) and r.get("ok"):
+            self.session.log({"type": "scene", "what": f"ROS 2 graph: {', '.join(t['topic'] for t in r.get('topics', []))[:180]}"})
+        return {"enable": en, **(r if isinstance(r, dict) else {"result": r})}
+
+    @tool("Verify the ROS 2 bridge end to end from the ROS side (WSL): which Isaac Sim topics are visible, a /clock sample "
+          "and the publish rate of each topic. Presses Play for the check if the simulation is stopped (play=true).")
+    def ros_bridge_check(self, topics: list = None, play: bool = True, seconds: int = 6) -> dict:
+        s_ = rosbridge.settings()
+        started = False
+        if play:
+            started = bool(self.kit.call("(lambda tl: (not tl.is_playing()) and (tl.play() or True))(__import__('omni.timeline').timeline.get_timeline_interface())", timeout=60))
+        topics = topics or ["/clock"]
+        script = config.state_file("ros_bridge_check.sh")
+        script.write_text(rosbridge.check_script(int(s_["domain_id"]), topics, seconds), encoding="utf-8", newline="\n")
+        r = self.runner.capture(f"bash {to_wsl_path(str(script))}", target="wsl", timeout=60 + 10 * len(topics), description="list Isaac Sim's ROS 2 topics and rates from WSL")
+        res = rosbridge.parse_check(r.out)
+        if started:
+            self.kit.call("__import__('omni.timeline').timeline.get_timeline_interface().stop() or True", timeout=60)
+        if not res.get("ok"):
+            res["hints"] = ["Isaac Sim must have been started with the bridge (isaac_launch after ros_bridge_setup)",
+                            f"same ROS_DOMAIN_ID on both sides (configured: {s_['domain_id']})",
+                            "the simulation must be playing", "Hyper-V firewall rule Simwright-DDS-WSL-In-d<domain> present"]
+        return {"domain_id": s_["domain_id"], **res}
 
     # ---------- NVIDIA Isaac Sim docs (kit-usd-agents MCP server) ----------
     @tool("Look up NVIDIA's Isaac Sim knowledge base (the official Isaac Sim MCP server) before writing Isaac Sim code: "

@@ -179,6 +179,16 @@ def repl(root):
 def dispatch(tb, c, rest):
     """Shared by the REPL and argparse subcommands."""
     a = rest + [""] * 4
+    if c == "ros" and a[0] == "bridge":
+        sub = a[1] or "check"
+        dom = next((int(x.split("=", 1)[1]) for x in rest if x.startswith("--domain=")), -1)
+        cams = [x.split("=", 1)[1] for x in rest if x.startswith("--camera=")]
+        if sub == "setup":
+            return tb.ros_bridge_setup(dom)
+        if sub == "graph":
+            return tb.ros_bridge_graph(cameras=cams or None, persist="--persist" in rest)
+        topics = [x for x in rest[2:] if x.startswith("/")]
+        return tb.ros_bridge_check(topics or None)
     if c == "ros":
         return tb.ros2_trace(a[1]) if a[0] == "trace" else tb.ros2_graph()
     if c == "urdf":
@@ -194,7 +204,7 @@ def dispatch(tb, c, rest):
                 "how": "Isaac Sim > Window > Extensions > Settings > Extension Search Paths: add this path, then enable simwright.copilot"}
     if c == "isaac":
         sub = a[0] or "status"
-        return {"launch": lambda: tb.isaac_launch("--headless" in rest), "status": tb.isaac_status, "scene": tb.isaac_scene,
+        return {"launch": lambda: tb.isaac_launch("--headless" in rest, True if "--ros" in rest else (False if "--no-ros" in rest else None)), "status": tb.isaac_status, "scene": tb.isaac_scene,
                 "check": lambda: tb.isaac_physics_check(float(a[1] or 3)), "capture": lambda: tb.isaac_capture(a[1] or ".simwright/captures/frame.png"),
                 "record": lambda: tb.isaac_record(float(a[1] or 4)), "assets": lambda: tb.isaac_asset_search(rest[1:]),
                 "exec": lambda: tb.isaac_exec(pathlib.Path(a[1]).read_text() if a[1] != "-" else sys.stdin.read()),

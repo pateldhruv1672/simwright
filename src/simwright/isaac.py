@@ -113,13 +113,21 @@ def launch_command(headless: bool = False, extra: list[str] | None = None) -> li
     return base + args + (extra or [])
 
 
-def launch(headless=False, wait=True, timeout=600, extra=None) -> dict:
-    argv = launch_command(headless, extra)
+def launch(headless=False, wait=True, timeout=600, extra=None, ros: bool | None = None) -> dict:
+    """ros: start with the ROS 2 bridge (bundled libraries, Fast DDS profile, domain from `ros_bridge` config).
+    None = on when `simwright ros bridge setup` has been run."""
+    from . import rosbridge
+    if ros is None:
+        ros = bool(config.load().get("ros_bridge"))
+    argv = launch_command(headless, (extra or []) + ([rosbridge.LAUNCH_FLAG] if ros else []))
+    inst = find_isaac_sim()
+    env = rosbridge.launch_env(inst.get("dir") or os.path.dirname(inst["launcher"])) if ros and inst else None
     log = config.state_file("isaac-sim.log")
     f = open(log, "wb")
     flags = 0x00000200 if os.name == "nt" else 0  # CREATE_NEW_PROCESS_GROUP
-    proc = subprocess.Popen(argv, stdout=f, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, creationflags=flags)
-    sess = {"pid": proc.pid, "argv": argv, "log": str(log), "started": time.time(), "host": "127.0.0.1", "port": 8226}
+    proc = subprocess.Popen(argv, stdout=f, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, creationflags=flags, env=env)
+    sess = {"pid": proc.pid, "argv": argv, "log": str(log), "started": time.time(), "host": "127.0.0.1", "port": 8226,
+            "ros": ({k: env[k] for k in ("ROS_DISTRO", "ROS_DOMAIN_ID", "FASTRTPS_DEFAULT_PROFILES_FILE")} if env else None)}
     config.write_state("kit_session.json", sess)
     if not wait:
         return sess

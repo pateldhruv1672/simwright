@@ -816,3 +816,28 @@ def test_connect_isaac_docs_entries(tmp_path):
     toml = (tmp_path / ".codex" / "config.toml").read_text()
     assert toml.count("[mcp_servers.isaac-sim-mcp]") == 1
     assert "--transport http" in connect_docs("claude", tmp_path, print_only=True, url="http://x/mcp")["run_this"]
+
+
+
+def test_rosbridge_pieces(tmp_path, monkeypatch):
+    from simwright import rosbridge as rb
+    assert rb.dds_ports(0) == (7400, 7649) and rb.dds_ports(31) == (15150, 15399)
+    xml = rb.profile_xml()
+    assert "<useBuiltinTransports>false</useBuiltinTransports>" in xml and "<address>127.0.0.1</address>" in xml
+    import xml.dom.minidom as md
+    md.parseString(xml)                                           # well-formed
+    assert "initialPeersList" not in rb.profile_xml([])
+    env = rb.launch_env(r"C:\isaac-sim", {"distro": "humble", "domain_id": 31, "profile": "p.xml"}, base_env={"PATH": "x"})
+    key = "PATH" if __import__("os").name == "nt" else "LD_LIBRARY_PATH"
+    assert env["ROS_DISTRO"] == "humble" and env["ROS_DOMAIN_ID"] == "31" and env["RMW_IMPLEMENTATION"] == "rmw_fastrtps_cpp"
+    assert "isaacsim.ros2.core" in env[key] and env["FASTRTPS_DEFAULT_PROFILES_FILE"] == "p.xml"
+    assert rb.wsl_domain_from_bashrc("source /opt/ros/humble/setup.bash\nexport ROS_DOMAIN_ID=31\n") == 31
+    assert rb.wsl_domain_from_bashrc("# export ROS_DOMAIN_ID=4") is None
+    assert "15150-15399" in rb.firewall_ps(31) and "-RemoteAddresses $ips" in rb.firewall_ps(31)
+    out = 'noise\nSWJSON {"topics": "/clock /parameter_events /rosout /g1/joint_states ", "clock_sec": "12", "rates": {"/clock": "59.8","/g1/joint_states": "60.1"}}\n'
+    r = rb.parse_check(out)
+    assert r["ok"] and r["from_isaac_sim"] == ["/clock", "/g1/joint_states"] and r["rates_hz"]["/clock"] == 59.8
+    bad = rb.parse_check('SWJSON {"topics": "/rosout", "clock_sec": "", "rates": {"/clock": "0"}}')
+    assert not bad["ok"]
+    s = rb.check_script(31, ["/clock", "/a/joint_states"])
+    assert "ROS_DOMAIN_ID=31" in s and "SWJSON" in s
