@@ -355,6 +355,23 @@ class Toolbox:
             self.session.log({"type": "scene", "what": f"mounted {name} on {link} face {face}" + (f" looking {look}" if look else "")})
         return r
 
+    @tool("Find and fix setups that make PhysX unstable or crash in the open stage: CCD on a GPU scene, articulation roots nested "
+          "inside another robot (e.g. an xArm gripper), limp drives (stiffness 0 and damping 0), links lighter than 20 g, low solver "
+          "iterations, self-collision. apply=false previews the changes; apply=true writes them as overrides in the scene file "
+          "(referenced robot assets stay untouched) after a backup. Save the stage afterwards to keep them.")
+    def isaac_physics_repair(self, scope: str = "/World", apply: bool = False, mass_floor: float = 0.02) -> dict:
+        if apply and self.runner.approver.decide("isaac-sim", f"physics repair under {scope}", "writes overrides into the open scene") != "run":
+            return {"ok": False, "skipped": True}
+        pre = "_bk = _backup_stage('physics-repair')\n" if apply else ""
+        r = self.kit.call(f"physics_repair({json.dumps(scope)}, apply={bool(apply)}, mass_floor={float(mass_floor)})", timeout=120)
+        if apply and isinstance(r, dict):
+            try:
+                r["backup"] = self.kit.call("_backup_stage('after-physics-repair')", timeout=60).get("path")
+            except Exception:
+                pass
+            self.session.log({"type": "scene", "what": f"physics repair under {scope}: {r.get('summary')}"})
+        return r
+
     @tool("Audit placement in the open stage: for each object `depth` levels under `scope`, is its bottom resting on "
           "the real surface below it? Reports floating (gap > 1 cm) and sunk objects with exact gaps. Read-only, time-bounded.")
     def isaac_placement_audit(self, scope: str = "/World", depth: int = 2, max_items: int = 120) -> dict:

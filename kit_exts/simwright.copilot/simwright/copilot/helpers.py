@@ -17,7 +17,7 @@ _TEST_STAGE = None
 _ASSET_CACHE = globals().get("_ASSET_CACHE") or {}
 
 
-HELPERS_VERSION = "0.3.1"
+HELPERS_VERSION = "0.3.2"
 
 
 def _stage():
@@ -275,6 +275,117 @@ def physics_preflight(max_prims=60000):
         issues.append({"severity": "warning", "issue": f"{len(bodies)} rigid bodies: GPU contact buffers may overflow on a 16 GB laptop GPU",
                        "fix": "make static props non-rigid (colliders only) and raise physxScene:gpuMaxRigidContactCount if needed"})
     return {"ok": not any(i["severity"] == "crash-risk" for i in issues), "rigid_bodies": len(bodies), "articulation_roots": roots[:30], "issues": issues[:40]}
+
+
+# Joint-name classes -> (stiffness, damping, max force, armature). USD angular drive units (per degree), the values that
+# made the G1 + Revo2 stable on Nov 4 2026. Only applied to drives left limp (stiffness 0 and damping 0).
+DRIVE_PROFILES = [
+    (re.compile(r"(hip|knee|ankle|waist|torso|leg|thigh|calf)", re.I), (400.0, 20.0, 300.0, 0.05)),
+    (re.compile(r"(shoulder|elbow|arm|joint[1-4]$)", re.I), (150.0, 8.0, 100.0, 0.03)),
+    (re.compile(r"(wrist|joint[5-7]$|head|neck)", re.I), (40.0, 2.0, 20.0, 0.01)),
+    (re.compile(r"(thumb|index|middle|ring|pinky|finger|knuckle|drive_joint|grip|hand)", re.I), (5.0, 0.5, 5.0, 0.005)),
+]
+
+
+def _profile(name):
+    for rx, v in DRIVE_PROFILES:
+        if rx.search(name):
+            return v
+    return (100.0, 5.0, 50.0, 0.01)
+
+
+def physics_repair(scope="/World", apply=False, mass_floor=0.02, solver=(32, 4), budget_s=6.0):
+    """Find and (with apply=True) fix the setups that make PhysX unstable or crash, as overrides on the current
+    edit target (the scene file); referenced robot assets are not modified.
+    - CCD on a GPU PhysX scene -> off
+    - an articulation root nested inside another robot (xArm gripper) -> removed, the inner part joins the outer one
+    - limp drives (stiffness 0 and damping 0) -> gains by joint class, plus armature
+    - links lighter than mass_floor (kg) -> raised, inertia scaled with it (same radius of gyration)
+    - articulations: solver iterations, self-collision off
+    Returns the list of changes (planned or applied)."""
+    st = _stage()
+    t0 = time.time()
+    root = st.GetPrimAtPath(scope)
+    if not root or not root.IsValid():
+        return {"ok": False, "error": f"{scope} not found"}
+    smpu = UsdGeom.GetStageMetersPerUnit(st) or 1.0
+    kg = UsdPhysics.GetStageKilogramsPerUnit(st) if hasattr(UsdPhysics, "GetStageKilogramsPerUnit") else 1.0
+    changes, truncated = [], False
+
+    def setattr_(prim, name, vtype, value, why):
+        a = prim.GetAttribute(name)
+        old = a.Get() if a and a.HasAuthoredValue() else None
+        changes.append({"prim": str(prim.GetPath()), "attr": name, "from": None if old is None else str(old), "to": str(value), "why": why})
+        if apply:
+            (a if a else prim.CreateAttribute(name, vtype)).Set(value)
+
+    for sc in [p for p in st.Traverse() if p.IsA(UsdPhysics.Scene)]:
+        gpu = bool(_attr(sc, "physxScene:enableGPUDynamics", True)) or str(_attr(sc, "physxScene:broadphaseType", "GPU")).upper() == "GPU"
+        if _attr(sc, "physxScene:enableCCD", False) and gpu:
+            setattr_(sc, "physxScene:enableCCD", Sdf.ValueTypeNames.Bool, False, "CCD is not supported by GPU PhysX")
+    roots = [p for p in Usd.PrimRange(root) if p.HasAPI(UsdPhysics.ArticulationRootAPI)]
+
+    def scope_of(p):
+        return p.GetParent() if p.IsA(UsdPhysics.Joint) and p.GetParent() else p
+    outer = sorted(roots, key=lambda p: len(str(scope_of(p).GetPath())))
+    kept = []
+    for p in outer:
+        sp = str(scope_of(p).GetPath())
+        host = next((k for k in kept if sp.startswith(str(scope_of(k).GetPath()) + "/")), None)
+        if host is not None:
+            changes.append({"prim": str(p.GetPath()), "attr": "apiSchemas", "from": "PhysicsArticulationRootAPI",
+                            "to": "(removed)", "why": f"nested inside the articulation at {host.GetPath()}; it joins that robot"})
+            if apply:
+                p.RemoveAPI(UsdPhysics.ArticulationRootAPI)
+                for api in ("PhysxArticulationAPI",):
+                    if api in [str(a) for a in p.GetAppliedSchemas()]:
+                        p.RemoveAppliedSchema(api)
+        else:
+            kept.append(p)
+    for p in kept:
+        it = p.GetAttribute("physxArticulation:solverPositionIterationCount")
+        if not it or (it.Get() or 0) < solver[0]:
+            setattr_(p, "physxArticulation:solverPositionIterationCount", Sdf.ValueTypeNames.Int, int(solver[0]), "more solver iterations for long chains and light fingers")
+        iv = p.GetAttribute("physxArticulation:solverVelocityIterationCount")
+        if not iv or (iv.Get() or 0) < solver[1]:
+            setattr_(p, "physxArticulation:solverVelocityIterationCount", Sdf.ValueTypeNames.Int, int(solver[1]), "velocity iterations")
+        if _attr(p, "physxArticulation:enabledSelfCollisions", True):
+            setattr_(p, "physxArticulation:enabledSelfCollisions", Sdf.ValueTypeNames.Bool, False, "adjacent links overlap in imported meshes")
+    for p in Usd.PrimRange(root):
+        if time.time() - t0 > budget_s:
+            truncated = True
+            break
+        if p.IsA(UsdPhysics.RevoluteJoint) or p.IsA(UsdPhysics.PrismaticJoint):
+            kind = "angular" if p.IsA(UsdPhysics.RevoluteJoint) else "linear"
+            k = _attr(p, f"drive:{kind}:physics:stiffness", 0.0) or 0.0
+            d = _attr(p, f"drive:{kind}:physics:damping", 0.0) or 0.0
+            if not p.HasAPI(UsdPhysics.DriveAPI, kind) or (k == 0.0 and d == 0.0):
+                ks, ds, fmax, arm = _profile(p.GetName())
+                if kind == "linear":
+                    ks, ds = ks * 10, ds * 10
+                if apply and not p.HasAPI(UsdPhysics.DriveAPI, kind):
+                    UsdPhysics.DriveAPI.Apply(p, kind)
+                setattr_(p, f"drive:{kind}:physics:stiffness", Sdf.ValueTypeNames.Float, ks, "limp drive (stiffness 0, damping 0)")
+                setattr_(p, f"drive:{kind}:physics:damping", Sdf.ValueTypeNames.Float, ds, "limp drive")
+                if (_attr(p, f"drive:{kind}:physics:maxForce", 0.0) or 0.0) <= 0:
+                    setattr_(p, f"drive:{kind}:physics:maxForce", Sdf.ValueTypeNames.Float, fmax, "no force limit")
+                if (_attr(p, "physxJoint:armature", 0.0) or 0.0) <= 0:
+                    setattr_(p, "physxJoint:armature", Sdf.ValueTypeNames.Float, arm, "armature stabilizes light links")
+        if p.HasAPI(UsdPhysics.MassAPI):
+            m = _attr(p, "physics:mass", None)
+            if m is not None and 0 < m * kg < mass_floor * 0.999:
+                f = mass_floor / (m * kg)
+                setattr_(p, "physics:mass", Sdf.ValueTypeNames.Float, mass_floor / kg, f"{m * kg * 1000:.0f} g link: too light for the solver")
+                I = _attr(p, "physics:diagonalInertia", None)
+                if I is not None:
+                    setattr_(p, "physics:diagonalInertia", Sdf.ValueTypeNames.Float3, Gf.Vec3f(*(float(v) * f for v in I)), "inertia scaled with the mass")
+    summary = {}
+    for c in changes:
+        key = c["attr"].split(":")[-1] if c["attr"] != "apiSchemas" else "nested articulation root"
+        summary[key] = summary.get(key, 0) + 1
+    return {"ok": True, "applied": bool(apply), "changes": len(changes), "summary": summary, "details": changes[:80],
+            "truncated": truncated, "edit_target": st.GetEditTarget().GetLayer().identifier,
+            "note": "overrides in the edit target; referenced robot assets unchanged" + ("" if apply else "; nothing changed yet (preview)")}
 
 
 def _marker_path():

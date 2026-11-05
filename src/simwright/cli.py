@@ -197,7 +197,9 @@ def dispatch(tb, c, rest):
         return {"launch": lambda: tb.isaac_launch("--headless" in rest), "status": tb.isaac_status, "scene": tb.isaac_scene,
                 "check": lambda: tb.isaac_physics_check(float(a[1] or 3)), "capture": lambda: tb.isaac_capture(a[1] or ".simwright/captures/frame.png"),
                 "record": lambda: tb.isaac_record(float(a[1] or 4)), "assets": lambda: tb.isaac_asset_search(rest[1:]),
-                "exec": lambda: tb.isaac_exec(pathlib.Path(a[1]).read_text() if a[1] != "-" else sys.stdin.read())}[sub]()
+                "exec": lambda: tb.isaac_exec(pathlib.Path(a[1]).read_text() if a[1] != "-" else sys.stdin.read()),
+                "repair": lambda: tb.isaac_physics_repair(a[1] if a[1] and not a[1].startswith("--") else "/World", apply="--apply" in rest),
+                "audit": lambda: tb.isaac_placement_audit(a[1] or "/World")}[sub]()
     if c == "world":
         spec = json.loads(pathlib.Path(a[0]).read_text())
         r = tb.world_compose(spec, pathlib.Path(a[0]).stem, apply="--no-apply" not in rest)

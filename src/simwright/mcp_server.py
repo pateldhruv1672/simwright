@@ -12,7 +12,7 @@ import argparse, inspect, json, os, pathlib, re, secrets, shutil, subprocess, sy
 
 READ_ONLY = {"read_file", "list_dir", "search_files", "ros2_graph", "ros2_trace", "urdf_validate", "colcon_diagnose",
              "isaac_status", "isaac_scene", "isaac_asset_search", "simready_search", "simready_catalog", "lab_tasks",
-             "lab_jobs", "lab_runs", "policy_list", "skill_list", "skill_read", "doctor", "project_memory", "isaac_placement_audit"}
+             "lab_jobs", "lab_runs", "policy_list", "skill_list", "skill_read", "doctor", "project_memory", "isaac_placement_audit"}  # isaac_physics_repair previews by default but can write
 DESTRUCTIVE = {"run_command", "write_file", "edit_file", "isaac_exec", "lab_stop", "policy_deploy"}
 OPEN_WORLD = {"run_command", "simready_search", "simready_fetch", "simready_place"}
 

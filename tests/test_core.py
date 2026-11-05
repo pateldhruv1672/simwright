@@ -677,3 +677,48 @@ def test_crash_report_detects_dead_kit(tmp_path):
     assert crash_report(marker=f) is None                      # still alive: not a crash
     f.write_text(_j.dumps({"state": "done", "kit_pid": 999999}))
     assert crash_report(marker=f) is None
+
+
+
+def test_physics_repair_fixes_overrides_only(tmp_path):
+    from pxr import Usd, UsdGeom, UsdPhysics, Sdf, Gf
+    # robot asset: arm articulation (root on a fixed joint), gripper with its own nested root, limp drives, a 1 g fingertip
+    f = tmp_path / "robot.usda"
+    a = Usd.Stage.CreateNew(str(f)); UsdGeom.SetStageMetersPerUnit(a, 1.0); UsdGeom.SetStageUpAxis(a, "Z")
+    r = UsdGeom.Xform.Define(a, "/Robot"); a.SetDefaultPrim(r.GetPrim())
+    for b in ("base", "link7", "gripper/base", "gripper/tip"):
+        p = UsdGeom.Xform.Define(a, f"/Robot/{b}").GetPrim(); UsdPhysics.RigidBodyAPI.Apply(p)
+        m = UsdPhysics.MassAPI.Apply(p); m.CreateMassAttr(0.001 if b.endswith("tip") else 1.0)
+        m.CreateDiagonalInertiaAttr(Gf.Vec3f(1e-7, 1e-7, 1e-7) if b.endswith("tip") else Gf.Vec3f(0.01, 0.01, 0.01))
+    rj = UsdPhysics.FixedJoint.Define(a, "/Robot/root_joint"); rj.CreateBody1Rel().SetTargets(["/Robot/base"]); UsdPhysics.ArticulationRootAPI.Apply(rj.GetPrim())
+    for name, b0, b1 in (("elbow_joint", "/Robot/base", "/Robot/link7"), ("finger_joint", "/Robot/gripper/base", "/Robot/gripper/tip")):
+        j = UsdPhysics.RevoluteJoint.Define(a, f"/Robot/{name}"); j.CreateBody0Rel().SetTargets([b0]); j.CreateBody1Rel().SetTargets([b1])
+        d = UsdPhysics.DriveAPI.Apply(j.GetPrim(), "angular"); d.CreateStiffnessAttr(0.0); d.CreateDampingAttr(0.0)
+    gj = UsdPhysics.FixedJoint.Define(a, "/Robot/gripper/root_joint"); gj.CreateBody0Rel().SetTargets(["/Robot/link7"]); gj.CreateBody1Rel().SetTargets(["/Robot/gripper/base"])
+    UsdPhysics.ArticulationRootAPI.Apply(gj.GetPrim())
+    a.Save()
+    before = f.read_text()
+    kh, st = _helpers_with_stage()
+    try:
+        sc = UsdPhysics.Scene.Define(st, "/World/PhysicsScene").GetPrim()
+        sc.CreateAttribute("physxScene:enableCCD", Sdf.ValueTypeNames.Bool).Set(True)
+        st.DefinePrim("/World/Robots/XArm", "Xform").GetReferences().AddReference(str(f))
+        assert not kh.physics_preflight()["ok"]
+        prev = kh.physics_repair("/World")
+        assert prev["changes"] > 0 and not prev["applied"]
+        assert st.GetPrimAtPath("/World/Robots/XArm/gripper/root_joint").HasAPI(UsdPhysics.ArticulationRootAPI)   # preview changes nothing
+        res = kh.physics_repair("/World", apply=True)
+        assert res["summary"].get("nested articulation root") == 1
+        assert not st.GetPrimAtPath("/World/Robots/XArm/gripper/root_joint").HasAPI(UsdPhysics.ArticulationRootAPI)
+        assert st.GetPrimAtPath("/World/Robots/XArm/root_joint").HasAPI(UsdPhysics.ArticulationRootAPI)          # outer root kept
+        fj = st.GetPrimAtPath("/World/Robots/XArm/finger_joint")
+        assert fj.GetAttribute("drive:angular:physics:stiffness").Get() == 5.0 and abs(fj.GetAttribute("physxJoint:armature").Get() - 0.005) < 1e-6
+        assert st.GetPrimAtPath("/World/Robots/XArm/elbow_joint").GetAttribute("drive:angular:physics:stiffness").Get() == 150.0
+        tip = st.GetPrimAtPath("/World/Robots/XArm/gripper/tip")
+        assert abs(tip.GetAttribute("physics:mass").Get() - 0.02) < 1e-6 and abs(tip.GetAttribute("physics:diagonalInertia").Get()[0] - 2e-6) < 1e-9
+        assert sc.GetAttribute("physxScene:enableCCD").Get() is False
+        assert kh.physics_preflight()["ok"]
+        assert kh.physics_repair("/World")["changes"] == 0        # idempotent
+        assert f.read_text() == before                            # the robot asset file is untouched
+    finally:
+        kh._TEST_STAGE = None
