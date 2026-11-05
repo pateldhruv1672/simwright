@@ -47,15 +47,33 @@ def run_doctor(runner: Runner | None = None, deep: bool = False) -> dict:
         add("Isaac Sim session", ping["ok"], f"python_server reachable, Kit {ping.get('kit')}")
     except KitError as e:
         add("Isaac Sim session", False, "not running", "simwright isaac launch")
+    from .lab import discover, _major
     L = Lab(cfg)
-    add("Isaac Lab", bool(L.dir), f"{L.version()} at {L.dir}" if L.dir else "not found",
-        "git clone https://github.com/isaac-sim/IsaacLab and run isaaclab.bat --install; then `simwright config isaac_lab_dir <path>`")
+    found = discover(cfg)
+    if L.dir:
+        env = next((i["env"] for i in found if i["dir"] == str(L.dir)), "")
+        others = [f"{i['version']} at {i['dir']}" for i in found if i["dir"] != str(L.dir)]
+        detail = f"{L.version()} at {L.dir}" + (f", conda env {env}" if env else (", python " + L.python if L.python else ", no env found: runs isaaclab.bat"))
+        if others:
+            detail += f" (also found: {'; '.join(others)})"
+        add("Isaac Lab", True, detail)
+        simv = inst.get("version", "") if inst else ""
+        pair = {3: 6, 2: 5, 1: 4}.get(_major(L.version()))
+        if pair and simv and _major(simv) != pair:
+            add("Isaac Lab / Isaac Sim pairing", False, f"Isaac Lab {L.version()} expects Isaac Sim {pair}.x, found {simv}",
+                f"`simwright config isaac_lab_dir <a {({6: 3, 5: 2}.get(_major(simv), '?'))}.x checkout>` or install the matching Isaac Sim")
+    else:
+        add("Isaac Lab", False, "not found",
+            "git clone https://github.com/isaac-sim/IsaacLab and run isaaclab.bat --install; then `simwright config isaac_lab_dir <path>`")
     runner = runner or Runner()
     try:
         t = Target.get(cfg.get("ros_target"))
         r = runner.capture("printenv ROS_DISTRO; command -v ros2 && command -v colcon", t, description="check ROS 2", timeout=60)
         ok = r.ok and "ros2" in r.out
-        add(f"ROS 2 ({t.key})", ok, r.out, "install ROS 2 (Jazzy on Ubuntu 24.04) in WSL, or set targets.ros to a Docker container; Isaac Sim 6 also supports native Windows ROS 2 via Pixi")
+        lines = [l.strip() for l in r.out.splitlines() if l.strip()]
+        distro = next((l for l in lines if "/" not in l), "")
+        tools = [n for n in ("ros2", "colcon") if any(l.endswith("/" + n) for l in lines)]
+        add(f"ROS 2 ({t.key})", ok, (f"{distro} · " if distro else "") + (", ".join(tools) or "ros2 not on PATH"), "install ROS 2 (Jazzy on Ubuntu 24.04) in WSL, or set targets.ros to a Docker container; Isaac Sim 6 also supports native Windows ROS 2 via Pixi")
     except Exception as e:
         add("ROS 2", False, str(e))
     bridge = pathlib.Path.home() / ".mana-terminal"

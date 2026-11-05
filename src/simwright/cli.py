@@ -68,7 +68,9 @@ def cmd_status(root):
     from . import lab
     from .isaac import find_isaac_sim
     _out({"version": __version__, "root": str(root), "doctor": run_doctor(), "isaac_sim": find_isaac_sim(),
-          "lab_version": lab.Lab().version(), "runs": lab.Lab().runs(15), "jobs": [
+          "lab_version": lab.Lab().version(), "lab": {"dir": str(lab.Lab().dir or ""), "python": lab.Lab().python,
+                                                       "installs": lab.discover()},
+          "runs": lab.Lab().runs(15), "jobs": [
               {k: v for k, v in j.items() if k not in ("tail",)} for j in lab.job_status()],
           "policies": lab.policies(), "skills": [{"name": s.name, "scope": s.scope} for s in skills.discover(root)],
           "context_file": context.load_context(root)[0]})
@@ -83,7 +85,7 @@ HELP = """Slash commands
   /urdf <file>   /build [pkgs]   /mujoco <xml>   /gazebo <world>
   /isaac launch|status|scene|check|capture|record|assets <kw>
   /world <spec.json>
-  /lab tasks|train <task>|jobs|runs|play <task>|export <task> <ckpt>|policies
+  /lab installs|tasks|train <task>|jobs|runs|play <task>|export <task> <ckpt>|policies
   /mode auto|step|ask        auto = run uninterrupted (ESC pauses), step = confirm each command
   /image <path>              attach a photo (e.g. of a room to match)
   /exit
@@ -175,6 +177,10 @@ def dispatch(tb, c, rest):
         return r
     if c == "lab":
         sub = a[0]
+        if sub == "installs":
+            from . import lab as labm
+            L = labm.Lab()
+            return {"ok": True, "selected": str(L.dir or ""), "python": L.python, "installs": labm.discover()}
         if sub == "tasks":
             return tb.lab_tasks(a[1])
         if sub == "train":

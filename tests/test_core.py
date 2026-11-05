@@ -267,3 +267,33 @@ def test_tool_schemas_and_mcp(tmp_path):
     mcp, _ = build(make_ws(tmp_path / "b"))
     names = {t.name for t in asyncio.run(mcp.list_tools())}
     assert {"ros2_graph", "isaac_physics_check", "lab_train", "world_compose", "skill_add"} <= names
+
+
+def test_lab_discovery(tmp_path, monkeypatch):
+    from simwright import lab
+    home = tmp_path / "home"
+    launcher = "isaaclab.bat" if __import__("os").name == "nt" else "isaaclab.sh"
+    for name, ver in (("IsaacLab", "2.3.2"), ("IsaacLab-beta", "3.0.0"), ("IsaacLab_5_1_broken", "2.3.0")):
+        d = home / "robotics" / name; d.mkdir(parents=True)
+        (d / launcher).write_text(""); (d / "VERSION").write_text(ver)
+    def env(name, src, simv):
+        e = home / ".conda" / "envs" / name
+        sp = e / "lib" / "python3.12" / "site-packages"; sp.mkdir(parents=True)
+        (e / "bin").mkdir(); (e / "bin" / "python").write_text("")
+        di = sp / "isaaclab-1.0.0.dist-info"; di.mkdir()
+        (di / "direct_url.json").write_text(json.dumps({"url": (home / "robotics" / src / "source" / "isaaclab").as_uri(), "dir_info": {"editable": True}}))
+        (sp / f"isaacsim-{simv}.0.dist-info").mkdir()
+    env("env_isaaclab", "IsaacLab", "5.1.0"); env("env_isaaclab_beta", "IsaacLab-beta", "6.0.1")
+    monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("CONDA_PREFIX", raising=False); monkeypatch.delenv("CONDA_EXE", raising=False)
+    monkeypatch.delenv("ISAAC_LAB_DIR", raising=False)
+    cfg = config._merge(config.DEFAULTS, {"isaac_lab_dir": ""})
+    found = lab.discover(cfg)
+    assert {i["version"] for i in found} == {"2.3.2", "3.0.0", "2.3.0"}
+    beta = next(i for i in found if i["version"] == "3.0.0")
+    assert beta["env"] == "env_isaaclab_beta" and beta["isaacsim"] == "6.0.1"
+    assert lab.choose(found, "6.0.1-rc.7")["version"] == "3.0.0"
+    assert lab.choose(found, "5.1.0")["version"] == "2.3.2"
+    L = lab.Lab.__new__(lab.Lab); L.cfg = cfg; L.lib = "rsl_rl"; L.python = beta["python"]; L.dir = pathlib.Path(beta["dir"])
+    cmd = L.train_cmd("Isaac-Cartpole-v0", max_iterations=10)
+    assert beta["python"] in cmd and "train.py" in cmd and str(L.dir) in cmd and "isaaclab.sh" not in cmd and "isaaclab.bat" not in cmd

@@ -11,18 +11,171 @@ JOBS = "jobs.json"
 POLICIES = "policies.json"
 
 
+def _ver(text: str) -> str:
+    m = re.search(r"(\d+\.\d+\.\d+)", text or "")
+    return m.group(1) if m else ""
+
+
+def _lab_version(d: pathlib.Path) -> str:
+    for f in (d / "VERSION", d / "source" / "isaaclab" / "config" / "extension.toml"):
+        if f.exists():
+            v = _ver(f.read_text(errors="ignore"))
+            if v:
+                return v
+    return ""
+
+
+def conda_env_dirs() -> list[pathlib.Path]:
+    """Every conda env we can see without running conda (fast, read-only)."""
+    home = pathlib.Path.home()
+    roots = [home / ".conda" / "envs", home / "anaconda3" / "envs", home / "miniconda3" / "envs",
+             home / "miniforge3" / "envs", home / "mambaforge" / "envs",
+             pathlib.Path(r"C:\ProgramData\anaconda3\envs"), pathlib.Path(r"C:\ProgramData\miniconda3\envs")]
+    for var in ("CONDA_EXE", "CONDA_PREFIX"):
+        v = os.environ.get(var)
+        if v:
+            base = pathlib.Path(v).parent.parent if var == "CONDA_EXE" else pathlib.Path(v)
+            roots += [base / "envs", base.parent]
+    seen, out = set(), []
+    for r in roots:
+        try:
+            kids = [k for k in r.iterdir() if k.is_dir()] if r.is_dir() else []
+        except OSError:
+            kids = []
+        for k in kids:
+            key = str(k).lower()
+            if key not in seen and _env_python(k):
+                seen.add(key)
+                out.append(k)
+    return out
+
+
+def _env_python(env: pathlib.Path) -> pathlib.Path | None:
+    for c in (env / "python.exe", env / "bin" / "python"):
+        if c.exists():
+            return c
+    return None
+
+
+def _site_packages(env: pathlib.Path) -> list[pathlib.Path]:
+    return [env / "Lib" / "site-packages"] + sorted((env / "lib").glob("python3*/site-packages"))
+
+
+def env_packages(env: pathlib.Path) -> dict:
+    """isaaclab source dir + isaacsim version installed in a conda env, from dist-info metadata."""
+    info = {"env": env.name, "prefix": str(env), "python": str(_env_python(env) or "")}
+    for sp in _site_packages(env):
+        if not sp.is_dir():
+            continue
+        for di in sp.glob("isaacsim-*.dist-info"):
+            info.setdefault("isaacsim", _ver(di.name))
+        for di in list(sp.glob("isaaclab-*.dist-info")) + list(sp.glob("isaaclab-*.egg-info")):
+            du = di / "direct_url.json"
+            if du.exists():
+                try:
+                    url = json.loads(du.read_text()).get("url", "")
+                    src = urllib_path(url)
+                    if src:
+                        info["isaaclab_src"] = src
+                except Exception:
+                    pass
+            info.setdefault("isaaclab_pkg", _ver(di.name))
+        for egg in sp.glob("isaaclab*.egg-link"):
+            info.setdefault("isaaclab_src", egg.read_text(errors="ignore").splitlines()[0].strip())
+    return info
+
+
+def urllib_path(url: str) -> str:
+    if not url.startswith("file:"):
+        return ""
+    from urllib.parse import urlparse, unquote
+    u = urlparse(url)
+    path = unquote(u.path)
+    if re.match(r"^/[A-Za-z]:", path):
+        path = path[1:]
+    return path
+
+
+def _same(a: str, b: pathlib.Path) -> bool:
+    try:
+        return pathlib.Path(a).resolve() == b.resolve() or str(pathlib.Path(a).resolve()).lower().startswith(str(b.resolve()).lower() + os.sep)
+    except OSError:
+        return False
+
+
+def discover(cfg: dict | None = None) -> list[dict]:
+    """All Isaac Lab checkouts on this machine, each with the conda env (if any) that installed it."""
+    cfg = cfg or config.load()
+    home = pathlib.Path.home()
+    launcher = "isaaclab.bat" if os.name == "nt" else "isaaclab.sh"
+    cands = [cfg.get("isaac_lab_dir"), os.environ.get("ISAAC_LAB_DIR")]
+    for base in (home, home / "robotics", home / "code", home / "src", home / "projects", home / "dev",
+                 home / "Documents", pathlib.Path.cwd(), pathlib.Path(r"C:\\")):
+        try:
+            cands += [str(d) for d in base.glob("*[Ii]saac*[Ll]ab*") if d.is_dir()]
+        except OSError:
+            pass
+    envs = [env_packages(e) for e in conda_env_dirs()]
+    out, seen = [], set()
+    for c in cands:
+        if not c:
+            continue
+        d = pathlib.Path(c)
+        if not (d / launcher).exists() or str(d.resolve()).lower() in seen:
+            continue
+        seen.add(str(d.resolve()).lower())
+        env = next((e for e in envs if e.get("isaaclab_src") and _same(e["isaaclab_src"], d)), None)
+        link = d / "_isaac_sim"
+        out.append({"dir": str(d), "version": _lab_version(d), "env": env["env"] if env else "",
+                    "python": env["python"] if env else "", "isaacsim": (env or {}).get("isaacsim", ""),
+                    "isaac_sim_link": str(link.resolve()) if link.exists() else "",
+                    "broken_hint": "broken" in d.name.lower()})
+    return out
+
+
+def _major(v: str) -> int:
+    try:
+        return int(v.split(".")[0])
+    except (ValueError, IndexError):
+        return -1
+
+
+def choose(installs: list[dict], isaac_sim_version: str = "") -> dict | None:
+    """Isaac Lab 3.x pairs with Isaac Sim 6.x, 2.x with 5.x. Prefer a matching, installed (env found), non-broken checkout."""
+    if not installs:
+        return None
+    want = {6: 3, 5: 2, 4: 1}.get(_major(isaac_sim_version), None)
+    def score(i):
+        return ((want is not None and _major(i["version"]) == want), bool(i["python"] or i["isaac_sim_link"]),
+                not i["broken_hint"], tuple(int(x) for x in (i["version"] or "0.0.0").split(".")))
+    return sorted(installs, key=score)[-1]
+
+
 class Lab:
     def __init__(self, cfg: dict | None = None):
         self.cfg = cfg or config.load()
         self.lib = self.cfg["lab"]["rl_library"]
+        self.python = self.cfg.get("isaac_lab_python") or ""
         self.dir = self._find()
 
     def _find(self) -> pathlib.Path | None:
-        for c in [self.cfg.get("isaac_lab_dir"), os.environ.get("ISAAC_LAB_DIR"), r"C:\IsaacLab",
-                  str(pathlib.Path.home() / "IsaacLab"), str(pathlib.Path.cwd() / "IsaacLab")]:
-            if c and (pathlib.Path(c) / ("isaaclab.bat" if os.name == "nt" else "isaaclab.sh")).exists():
-                return pathlib.Path(c)
-        return None
+        launcher = "isaaclab.bat" if os.name == "nt" else "isaaclab.sh"
+        explicit = self.cfg.get("isaac_lab_dir") or os.environ.get("ISAAC_LAB_DIR")
+        if explicit and (pathlib.Path(explicit) / launcher).exists():
+            if not self.python:
+                hit = next((i for i in discover(self.cfg) if _same(i["dir"], pathlib.Path(explicit))), None)
+                self.python = (hit or {}).get("python", "")
+            return pathlib.Path(explicit)
+        try:
+            from .isaac import find_isaac_sim
+            simv = (find_isaac_sim(self.cfg) or {}).get("version", "")
+        except Exception:
+            simv = ""
+        pick = choose(discover(self.cfg), simv)
+        if not pick:
+            return None
+        self.python = self.python or pick["python"]
+        return pathlib.Path(pick["dir"])
 
     def require(self):
         if not self.dir:
@@ -33,22 +186,19 @@ class Lab:
         return str(self.dir / ("isaaclab.bat" if os.name == "nt" else "isaaclab.sh"))
 
     def version(self) -> str:
-        if not self.dir:
-            return ""
-        for f in (self.dir / "VERSION", self.dir / "source" / "isaaclab" / "config" / "extension.toml"):
-            if f.exists():
-                m = re.search(r'(\d+\.\d+\.\d+)', f.read_text())
-                if m:
-                    return m.group(1)
-        return ""
+        return _lab_version(self.dir) if self.dir else ""
 
     def script(self, key: str) -> str:
         return self.cfg["lab"][key].format(lib=self.lib)
 
     def _cmd(self, key: str, args: str) -> str:
-        q = f'"{self.launcher}"' if " " in self.launcher else self.launcher
         prefix = "& " if os.name == "nt" else ""
-        return f"{prefix}{q} -p {self.script(key)} {args}".strip()
+        script = str(self.dir / self.script(key))
+        script = f'"{script}"' if " " in script else script
+        if self.python:  # the conda env that installed this checkout: same as `isaaclab -p` with it activated
+            return f'{prefix}"{self.python}" {script} {args}'.strip()
+        q = f'"{self.launcher}"' if " " in self.launcher else self.launcher
+        return f"{prefix}{q} -p {script} {args}".strip()
 
     def train_cmd(self, task: str, num_envs: int | None = None, max_iterations: int | None = None,
                   headless: bool = True, seed: int | None = None, extra: str = "") -> str:
