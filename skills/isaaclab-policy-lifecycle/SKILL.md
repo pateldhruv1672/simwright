@@ -22,3 +22,6 @@ description: Train, monitor, evaluate, export, register and deploy reinforcement
 - Isaac Lab 3.0 needs Isaac Sim 6.2 + Python 3.12 and uses XYZW quaternions (2.x used WXYZ). Convert hand-written rotations.
 - Windows: use `isaaclab.bat`; logs land in `<IsaacLab>/logs/<library>/<experiment>/<timestamp>/`.
 - Record the winning command line, seed and commit in SIMWRIGHT.md under Policies.
+
+## Continuing work
+- Read `project_memory` first: earlier training runs, checkpoints and decisions are in `.simwright/notes.md` and the archived conversations. Record each registered policy and its run directory with `project_note`.

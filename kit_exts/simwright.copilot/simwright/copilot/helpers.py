@@ -4,18 +4,25 @@ omni.physx and omni.client so it works across Isaac Sim 5.x and 6.x."""
 import math, os, re, time
 
 try:
-    import omni.usd, omni.timeline, omni.kit.app
     from pxr import Usd, UsdGeom, UsdLux, UsdPhysics, Gf, Sdf
-except ImportError:  # imported outside Kit (tests): definitions only
+except ImportError:  # no USD at all (plain unit tests): definitions only
     pass
+try:
+    import omni.usd, omni.timeline, omni.kit.app
+except ImportError:  # outside Kit (tests use usd-core and set _TEST_STAGE)
+    pass
+
+_TEST_STAGE = None
 
 _ASSET_CACHE = globals().get("_ASSET_CACHE") or {}
 
 
-HELPERS_VERSION = "0.2.3"
+HELPERS_VERSION = "0.3.0"
 
 
 def _stage():
+    if _TEST_STAGE is not None:
+        return _TEST_STAGE
     return omni.usd.get_context().get_stage()
 
 
@@ -316,46 +323,181 @@ def _bbox(prim):
     return r
 
 
+# ---------------- placement geometry (pure numpy core; USD only for gathering triangles) ----------------
+def ray_down_heights(tris, pts, z_ceiling=float("inf")):
+    """Highest surface z under each (x, y) in `pts`, below z_ceiling, from triangles `tris` (N,3,3) in world units.
+    Vertical ray cast: a point hits a triangle when it lies inside the triangle's XY projection (barycentric test).
+    Returns a list with a float per point, or None where nothing is below."""
+    import numpy as np
+    tris = np.asarray(tris, dtype=np.float64).reshape(-1, 3, 3)
+    out = []
+    if not len(tris):
+        return [None] * len(pts)
+    a, b, c = tris[:, 0], tris[:, 1], tris[:, 2]
+    v0, v1 = b[:, :2] - a[:, :2], c[:, :2] - a[:, :2]
+    den = v0[:, 0] * v1[:, 1] - v1[:, 0] * v0[:, 1]
+    ok = np.abs(den) > 1e-14  # skip vertical / degenerate triangles: they are walls, not surfaces
+    for x, y in pts:
+        v2x, v2y = x - a[:, 0], y - a[:, 1]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            u = (v2x * v1[:, 1] - v1[:, 0] * v2y) / den
+            v = (v0[:, 0] * v2y - v2x * v0[:, 1]) / den
+            inside = ok & (u >= -1e-9) & (v >= -1e-9) & (u + v <= 1 + 1e-9)
+        if not inside.any():
+            out.append(None)
+            continue
+        z = a[inside, 2] + u[inside] * (b[inside, 2] - a[inside, 2]) + v[inside] * (c[inside, 2] - a[inside, 2])
+        z = z[z <= z_ceiling + 1e-9]
+        out.append(float(z.max()) if len(z) else None)
+    return out
+
+
+def footprint_samples(mn, mx, inset=0.08, n=3):
+    """n x n grid over the footprint rectangle, inset a little so edge-on contacts don't count."""
+    xs = [mn[0] + (mx[0] - mn[0]) * (inset + (1 - 2 * inset) * i / (n - 1)) for i in range(n)]
+    ys = [mn[1] + (mx[1] - mn[1]) * (inset + (1 - 2 * inset) * j / (n - 1)) for j in range(n)]
+    return [(x, y) for x in xs for y in ys]
+
+
+def rest_height(tris, mn, mx, z_ceiling=float("inf"), n=3):
+    """Where an object with world footprint [mn, mx] comes to rest when lowered onto `tris`:
+    the highest surface under any footprint sample (a box lands on its highest support).
+    Returns (z or None, supported_fraction)."""
+    hs = ray_down_heights(tris, footprint_samples(mn, mx, n=n), z_ceiling)
+    hits = [h for h in hs if h is not None]
+    if not hits:
+        return None, 0.0
+    top = max(hits)
+    tol = max(1e-6, 0.005 * (abs(top) if abs(top) < 1 else 1) + 0.002)   # ~5 mm in meter-scale stages
+    touching = sum(1 for h in hits if h >= top - tol)   # samples actually under the surface it rests on
+    return top, touching / len(hs)
+
+
+def _tris_world(prims, max_tris=400000, budget_s=6.0, exclude=None, xy_box=None):
+    """World-space triangles of every Mesh under `prims` (instance proxies included), fan-triangulated.
+    Bounded by max_tris and a time budget so it can never hang Kit. xy_box=(xmin,ymin,xmax,ymax) skips meshes
+    whose world bounds miss it."""
+    import numpy as np
+    t0 = time.time()
+    xc = UsdGeom.XformCache()
+    cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
+    chunks, n, truncated = [], 0, False
+    pred = Usd.TraverseInstanceProxies(Usd.PrimAllPrimsPredicate)
+    ex = str(exclude) if exclude else None
+    for root in prims:
+        for p in Usd.PrimRange(root, pred):
+            if time.time() - t0 > budget_s or n > max_tris:
+                truncated = True
+                break
+            if ex and (str(p.GetPath()) == ex or str(p.GetPath()).startswith(ex + "/")):
+                continue
+            if not p.IsA(UsdGeom.Mesh):
+                continue
+            im = UsdGeom.Imageable(p)
+            if im.ComputeVisibility() == UsdGeom.Tokens.invisible or im.ComputePurpose() in (UsdGeom.Tokens.guide, UsdGeom.Tokens.proxy):
+                continue
+            if xy_box is not None:
+                r = cache.ComputeWorldBound(p).ComputeAlignedRange()
+                if r.IsEmpty() or r.GetMax()[0] < xy_box[0] or r.GetMin()[0] > xy_box[2] or r.GetMax()[1] < xy_box[1] or r.GetMin()[1] > xy_box[3]:
+                    continue
+            m = UsdGeom.Mesh(p)
+            pts = m.GetPointsAttr().Get()
+            cnt = m.GetFaceVertexCountsAttr().Get()
+            idx = m.GetFaceVertexIndicesAttr().Get()
+            if not pts or not cnt or not idx:
+                continue
+            P = np.asarray(pts, dtype=np.float64)
+            M = np.asarray(xc.GetLocalToWorldTransform(p), dtype=np.float64)  # row-vector convention
+            Pw = P @ M[:3, :3] + M[3, :3]
+            cnt = np.asarray(cnt); idx = np.asarray(idx)
+            tri = []
+            o = 0
+            if (cnt == 3).all():
+                tri = idx.reshape(-1, 3)
+            else:
+                rows = []
+                for c in cnt:
+                    for k in range(1, c - 1):
+                        rows.append((idx[o], idx[o + k], idx[o + k + 1]))
+                    o += c
+                tri = np.asarray(rows, dtype=np.int64) if rows else np.zeros((0, 3), np.int64)
+            if len(tri):
+                chunks.append(Pw[tri])
+                n += len(tri)
+        if truncated:
+            break
+    T = np.concatenate(chunks) if chunks else np.zeros((0, 3, 3))
+    return T, {"triangles": int(len(T)), "truncated": truncated, "seconds": round(time.time() - t0, 2)}
+
+
+def _world_to_parent_delta(prim, dworld):
+    """A world-space displacement expressed in the prim's parent frame (handles moved / rotated / scaled groups)."""
+    parent = prim.GetParent()
+    if not parent or parent.IsPseudoRoot():
+        return Gf.Vec3d(dworld)
+    M = UsdGeom.XformCache().GetLocalToWorldTransform(parent)
+    return M.GetInverse().TransformDir(Gf.Vec3d(dworld))
+
+
+def _parent_scale(prim):
+    parent = prim.GetParent()
+    if not parent or parent.IsPseudoRoot():
+        return 1.0
+    M = UsdGeom.XformCache().GetLocalToWorldTransform(parent)
+    return (Gf.Vec3d(M.GetRow3(0)).GetLength() + Gf.Vec3d(M.GetRow3(1)).GetLength() + Gf.Vec3d(M.GetRow3(2)).GetLength()) / 3.0
+
+
 def place_asset(path, url, x, y, yaw_deg=0.0, fit=None, z=0.0, kind=""):
-    """Reference `url` under an Xform at `path`; scale so its footprint fits `fit`=[w,d] (meters); rest it on z."""
+    """World-composer placement: reference `url` (units/up axis corrected), scale uniformly so its footprint fits
+    `fit`=[w, d] (meters), and lower it onto the floor under (x, y) (or rest it at `z` if z > 0). Without a url,
+    a box of fit=[w, d, h] stands in. Shares place_usd's math, so groups and raised floors are handled."""
     st = _stage()
-    mpu = UsdGeom.GetStageMetersPerUnit(st) or 1.0
-    holder = UsdGeom.Xform.Define(st, path)
-    child = st.DefinePrim(path + "/asset", "Xform")
+    smpu = UsdGeom.GetStageMetersPerUnit(st) or 1.0
     if url:
-        child.GetReferences().AddReference(url)
-    else:
-        cube = UsdGeom.Cube.Define(st, path + "/asset/box")
-        cube.GetSizeAttr().Set(1.0 / mpu)
-        UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
+        r = place_usd(path, url, x, y, yaw_deg, z=(z if z else None))
+        if not r.get("ok") or not fit:
+            if kind and r.get("ok"):
+                st.GetPrimAtPath(path).CreateAttribute("simwright:kind", Sdf.ValueTypeNames.String).Set(kind)
+            return r
+        w, d = r["size_m"][0], r["size_m"][1]
+        cur, want = sorted([w, d]), sorted([float(fit[0]), float(fit[1])])
+        s_ = min(want[1] / max(cur[1], 1e-6), want[0] / max(cur[0], 1e-6))
+        pr = st.GetPrimAtPath(path)
+        ops = {op.GetOpName(): op for op in UsdGeom.Xformable(pr).GetOrderedXformOps()}
+        sop = ops.get("xformOp:scale")
+        if sop is not None and abs(s_ - 1.0) > 1e-3:
+            sop.Set(Gf.Vec3f(*(v * s_ for v in sop.Get())))
+            r = place_usd(path, url, x, y, yaw_deg, z=(z if z else None), target_size=max(r["size_m"]) * s_)
+        r["fit_scale"] = round(s_, 4)
+        if kind:
+            st.GetPrimAtPath(path).CreateAttribute("simwright:kind", Sdf.ValueTypeNames.String).Set(kind)
+        return r
+    holder = UsdGeom.Xform.Define(st, path)
+    w, d, h = (list(fit) + [0.8] * 3)[:3] if fit else (1.0, 1.0, 0.8)
+    cube = UsdGeom.Cube.Define(st, path + "/box")
+    cube.GetSizeAttr().Set(1.0)
+    UsdGeom.XformCommonAPI(cube).SetScale(Gf.Vec3f(w / smpu, d / smpu, h / smpu))
+    UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
     api = UsdGeom.XformCommonAPI(holder)
     api.SetRotate(Gf.Vec3f(0, 0, float(yaw_deg)))
-    r = _bbox(child)
-    size = r.GetSize() if not r.IsEmpty() else Gf.Vec3d(1, 1, 1)
-    s = 1.0
-    if fit:
-        fx, fy = fit[0] / mpu, fit[1] / mpu
-        cur = sorted([size[0], size[1]])
-        want = sorted([fx, fy])
-        if cur[1] > 0:
-            s = min(want[1] / cur[1], want[0] / max(cur[0], 1e-6)) if url else 1.0
-        if not url:
-            UsdGeom.XformCommonAPI(UsdGeom.Xformable(child)).SetScale(Gf.Vec3f(fx, fy, (fit[2] if len(fit) > 2 else 0.8) / mpu))
-    if url:
-        api.SetScale(Gf.Vec3f(s, s, s))
-    r = _bbox(holder.GetPrim())
-    zmin = r.GetMin()[2] if not r.IsEmpty() else 0.0
-    api.SetTranslate(Gf.Vec3d(x / mpu, y / mpu, z / mpu - zmin))
+    b = _bbox(holder.GetPrim())
+    mn, mx = b.GetMin(), b.GetMax()
+    _ = mx
+    tris, _ti = _tris_world([st.GetPseudoRoot()], budget_s=4.0, exclude=path,
+                            xy_box=(x / smpu - w, y / smpu - d, x / smpu + w, y / smpu + d))
+    floor, _f = rest_height(tris, (x / smpu - w / 2 / smpu, y / smpu - d / 2 / smpu), (x / smpu + w / 2 / smpu, y / smpu + d / 2 / smpu), 0.5 / smpu)
+    base = (z / smpu) if z else (floor or 0.0)
+    pt = Gf.Vec3d(x / smpu, y / smpu, base - mn[2] + 0.001 / smpu)
+    if holder.GetPrim().GetParent() and not holder.GetPrim().GetParent().IsPseudoRoot():
+        pt = UsdGeom.XformCache().GetLocalToWorldTransform(holder.GetPrim().GetParent()).GetInverse().Transform(pt)
+    api.SetTranslate(pt)
     if kind:
         holder.GetPrim().CreateAttribute("simwright:kind", Sdf.ValueTypeNames.String).Set(kind)
     rr = _bbox(holder.GetPrim())
-    return {"path": path, "url": url, "scale": round(s, 4), "bbox_min": list(rr.GetMin()), "bbox_max": list(rr.GetMax())}
+    return {"ok": True, "path": path, "url": url, "scale": 1.0, "bbox_min": [v * smpu for v in rr.GetMin()], "bbox_max": [v * smpu for v in rr.GetMax()]}
 
-
-def place_usd(path, url, x=None, y=None, yaw_deg=0.0, z=None, on=None, physics="auto", target_size=None):
-    """Reference a USD (local file or URL) at `path`, correct its units and up axis, rotate about Z and rest its
-    bbox bottom at z (default: the floor, or the top of prim `on`), centered on (x, y) (default: the center of `on`).
-    physics: auto (keep the asset's own physics, else add a static collider), dynamic, static, none."""
+def _reference_unit_scaled(path, url, yaw_deg):
+    """Reference `url` at `path` with units and up axis corrected for its parent's world scale. Returns (prim, ops)."""
     st = _stage()
     smpu = UsdGeom.GetStageMetersPerUnit(st) or 1.0
     pr = st.DefinePrim(path, "Xform")
@@ -365,36 +507,79 @@ def place_usd(path, url, x=None, y=None, yaw_deg=0.0, z=None, on=None, physics="
     info = lay.pseudoRoot if lay else None
     ampu = (info.GetInfo("metersPerUnit") if info is not None and info.HasInfo("metersPerUnit") else 0.01) or 0.01
     up = info.GetInfo("upAxis") if info is not None and info.HasInfo("upAxis") else "Y"
-    k = ampu / smpu
+    k = (ampu / smpu) / (_parent_scale(pr) or 1.0)   # a scaled group must not rescale the asset again
     xf = UsdGeom.Xformable(pr)
     xf.ClearXformOpOrder()
     t_op, r_op, s_op = xf.AddTranslateOp(), xf.AddRotateXYZOp(), xf.AddScaleOp()
     s_op.Set(Gf.Vec3f(k, k, k))
     r_op.Set(Gf.Vec3f(90.0 if up == "Y" else 0.0, 0.0, float(yaw_deg)))
     t_op.Set(Gf.Vec3d(0, 0, 0))
+    return pr, (t_op, r_op, s_op), {"asset_mpu": ampu, "up_axis": up, "scale": k, "stage_mpu": smpu}
+
+
+def _move_world(pr, t_op, dworld):
+    cur = Gf.Vec3d(t_op.Get() or Gf.Vec3d(0, 0, 0))
+    t_op.Set(cur + _world_to_parent_delta(pr, dworld))
+
+
+def place_usd(path, url, x=None, y=None, yaw_deg=0.0, z=None, on=None, physics="auto", target_size=None, budget_s=8.0):
+    """Reference a USD (local file or URL) at `path` and set it down the way a person would.
+    - units and up axis corrected, also inside moved/scaled groups (positions are solved in the parent's frame)
+    - (x, y) in meters: footprint center; defaults to the center of `on`
+    - height: explicit `z` (meters, bottom of the object), else lowered onto the real surface under its footprint:
+      the triangles of `on` (a table, shelf, pedestal) or, without `on`, the highest surface below 0.5 m (the floor).
+      Ray casts through the mesh, so a lamp or back panel on the support does not lift the object.
+    physics: auto (keep the asset's own; add colliders only when it has none), dynamic, static, none."""
+    st = _stage()
+    smpu = UsdGeom.GetStageMetersPerUnit(st) or 1.0
+    pr, (t_op, r_op, s_op), unit = _reference_unit_scaled(path, url, yaw_deg)
     b = _bbox(pr)
     if b.IsEmpty():
         return {"ok": False, "path": path, "error": "asset has no renderable geometry (empty bounds)"}
     if target_size:
         ext = b.GetMax() - b.GetMin()
         k2 = (target_size / smpu) / max(ext[0], ext[1], ext[2])
-        s_op.Set(Gf.Vec3f(k * k2, k * k2, k * k2))
+        s_op.Set(Gf.Vec3f(*(v * k2 for v in s_op.Get())))
         b = _bbox(pr)
-    support = None
+    sp = None
     if on:
         sp = st.GetPrimAtPath(on)
         if not sp or not sp.IsValid():
             return {"ok": False, "path": path, "error": f"support prim {on} not found"}
-        support = _bbox(sp)
+        sb = _bbox(sp)
         if x is None:
-            x = (support.GetMin()[0] + support.GetMax()[0]) / 2 * smpu
+            x = (sb.GetMin()[0] + sb.GetMax()[0]) / 2 * smpu
         if y is None:
-            y = (support.GetMin()[1] + support.GetMax()[1]) / 2 * smpu
-        if z is None:
-            z = support.GetMax()[2] * smpu + 0.002
-    x, y, z = float(x or 0.0), float(y or 0.0), float(z or 0.0)
+            y = (sb.GetMin()[1] + sb.GetMax()[1]) / 2 * smpu
+    x, y = float(x or 0.0), float(y or 0.0)
+    # 1) center the footprint on (x, y) (world), keeping the current height
     mn, mx = b.GetMin(), b.GetMax()
-    t_op.Set(Gf.Vec3d(x / smpu - (mn[0] + mx[0]) / 2, y / smpu - (mn[1] + mx[1]) / 2, z / smpu - mn[2]))
+    _move_world(pr, t_op, Gf.Vec3d(x / smpu - (mn[0] + mx[0]) / 2, y / smpu - (mn[1] + mx[1]) / 2, 0))
+    b = _bbox(pr); mn, mx = b.GetMin(), b.GetMax()
+    # 2) find the rest height under the footprint
+    info = {"method": "explicit z"}
+    frac = None
+    if z is not None:
+        rest = float(z) / smpu
+    else:
+        pad = 0.02 / smpu
+        box = (mn[0] - pad, mn[1] - pad, mx[0] + pad, mx[1] + pad)
+        if sp is not None:
+            tris, ti = _tris_world([sp], budget_s=budget_s, exclude=path, xy_box=box)
+            rest, frac = rest_height(tris, mn, mx, _bbox(sp).GetMax()[2] + 1e-6)
+            info = {"method": f"raycast onto {on}", **ti}
+            if rest is None:  # footprint entirely off the support's surface
+                rest = _bbox(sp).GetMax()[2]
+                info["warning"] = "no surface of the support under the footprint; used its top bound"
+        else:
+            tris, ti = _tris_world([st.GetPseudoRoot()], budget_s=budget_s, exclude=path, xy_box=box)
+            rest, frac = rest_height(tris, mn, mx, 0.5 / smpu)
+            info = {"method": "raycast onto the floor (highest surface below 0.5 m)", **ti}
+            if rest is None:
+                rest = 0.0
+                info["warning"] = "no floor mesh under the footprint; used z = 0"
+    _move_world(pr, t_op, Gf.Vec3d(0, 0, rest + 0.001 / smpu - mn[2]))
+    # 3) physics: keep authored physics; never nest a rigid body inside another
     every = list(Usd.PrimRange(pr, Usd.TraverseInstanceProxies(Usd.PrimAllPrimsPredicate)))  # SimReady instances its meshes
     has_body = any(p.HasAPI(UsdPhysics.RigidBodyAPI) or p.HasAPI(UsdPhysics.ArticulationRootAPI) for p in every)
     has_col = any(p.HasAPI(UsdPhysics.CollisionAPI) for p in every)
@@ -411,15 +596,168 @@ def place_usd(path, url, x=None, y=None, yaw_deg=0.0, z=None, on=None, physics="
         UsdPhysics.MassAPI.Apply(pr).CreateDensityAttr(600.0)
         added += "+rigid body"
     rb = _bbox(pr)
-    out = {"ok": True, "path": path, "url": url, "scale": round(k, 5), "up_axis": up,
+    out = {"ok": True, "path": path, "url": url, **unit,
            "bbox_min": [round(v * smpu, 4) for v in rb.GetMin()], "bbox_max": [round(v * smpu, 4) for v in rb.GetMax()],
            "size_m": [round((rb.GetMax()[i] - rb.GetMin()[i]) * smpu, 4) for i in range(3)],
+           "rest_on_m": round(rest * smpu, 4), "bottom_m": round(rb.GetMin()[2] * smpu, 4),
+           "supported_fraction": None if frac is None else round(frac, 2), "height_method": info,
            "asset_physics": {"rigid_body": has_body, "colliders": has_col}, "added": added}
-    if support is not None:
+    if frac is not None and frac < 0.5:
+        out["warning"] = f"only {int(frac * 100)}% of the footprint is over a surface: it overhangs or sits on an edge; move it"
+    if sp is not None:
+        sb = _bbox(sp)
         out["on"] = on
-        out["inside_support_xy"] = bool(rb.GetMin()[0] >= support.GetMin()[0] - 1e-3 and rb.GetMax()[0] <= support.GetMax()[0] + 1e-3
-                                        and rb.GetMin()[1] >= support.GetMin()[1] - 1e-3 and rb.GetMax()[1] <= support.GetMax()[1] + 1e-3)
+        out["inside_support_xy"] = bool(rb.GetMin()[0] >= sb.GetMin()[0] - 1e-3 and rb.GetMax()[0] <= sb.GetMax()[0] + 1e-3
+                                        and rb.GetMin()[1] >= sb.GetMin()[1] - 1e-3 and rb.GetMax()[1] <= sb.GetMax()[1] + 1e-3)
     return out
+
+
+_AXES = {"+x": (1, 0, 0), "-x": (-1, 0, 0), "+y": (0, 1, 0), "-y": (0, -1, 0), "+z": (0, 0, 1), "-z": (0, 0, -1)}
+
+
+def _rot_from_to(a, b):
+    a, b = Gf.Vec3d(*a).GetNormalized(), Gf.Vec3d(*b).GetNormalized()
+    return Gf.Rotation(a, b) if (a - b).GetLength() > 1e-9 else Gf.Rotation(Gf.Vec3d(1, 0, 0), 0)
+
+
+def _basis(x, y, z):
+    """4x4 whose rows are the images of the local X, Y, Z axes (USD row-vector convention: p_parent = p_local * M)."""
+    return Gf.Matrix4d(x[0], x[1], x[2], 0, y[0], y[1], y[2], 0, z[0], z[1], z[2], 0, 0, 0, 0, 1)
+
+
+def _rpy(rpy):
+    r = Gf.Matrix4d().SetRotate(Gf.Rotation(Gf.Vec3d(1, 0, 0), float(rpy[0])))
+    p = Gf.Matrix4d().SetRotate(Gf.Rotation(Gf.Vec3d(0, 1, 0), float(rpy[1])))
+    y = Gf.Matrix4d().SetRotate(Gf.Rotation(Gf.Vec3d(0, 0, 1), float(rpy[2])))
+    return r * p * y   # roll, then pitch, then yaw (in the item's frame)
+
+
+def mount(path_or_name, url, link, face="+z", offset=(0.0, 0.0, 0.0), rpy=(0.0, 0.0, 0.0), look=None, gap=0.0,
+          kind="attach", camera_focal=18.0):
+    """Mount something on a robot link so it moves with it.
+    - created as a child of `link`, so its transform is in the link's frame and follows the link
+    - `face` (+x/-x/+y/-y/+z/-z of the link's own bounds): the item's bottom (its -Z after the up-axis fix) is turned
+      to face the link and its nearest side touches that face, centered on it; `gap` and `offset` are meters in the
+      link frame, `rpy` degrees in the item frame
+    - url="camera" makes a USD Camera at the face center; `look` ("+x", "-z", ...) points its view along that link axis
+    - kind="attach": rigid bodies inside the item are disabled (no nested rigid bodies; its colliders join the link);
+      kind="visual": physics stripped."""
+    st = _stage()
+    smpu = UsdGeom.GetStageMetersPerUnit(st) or 1.0
+    lp = st.GetPrimAtPath(link)
+    if not lp or not lp.IsValid():
+        return {"ok": False, "error": f"link {link} not found"}
+    name = path_or_name.split("/")[-1]
+    path = f"{link}/{name}"
+    L = UsdGeom.XformCache().GetLocalToWorldTransform(lp)
+    lscale = (Gf.Vec3d(L.GetRow3(0)).GetLength() + Gf.Vec3d(L.GetRow3(1)).GetLength() + Gf.Vec3d(L.GetRow3(2)).GetLength()) / 3.0
+    to_link = 1.0 / (smpu * lscale)               # meters -> link-local units
+    cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
+    old = st.GetPrimAtPath(path)
+    if old and old.IsValid():
+        st.RemovePrim(path)                        # re-mounting replaces, and keeps it out of the link's bounds
+    lb = cache.ComputeUntransformedBound(lp).ComputeAlignedRange()
+    n = Gf.Vec3d(*_AXES[face])
+    center = (lb.GetMin() + lb.GetMax()) / 2 if not lb.IsEmpty() else Gf.Vec3d(0, 0, 0)
+    half = (lb.GetMax() - lb.GetMin()) / 2 if not lb.IsEmpty() else Gf.Vec3d(0, 0, 0)
+    anchor = Gf.Vec3d(center[0] + n[0] * half[0], center[1] + n[1] * half[1], center[2] + n[2] * half[2])
+    dot = lambda a, b: a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    if url == "camera":
+        cam = UsdGeom.Camera.Define(st, path)
+        cam.CreateFocalLengthAttr(float(camera_focal))
+        cam.CreateClippingRangeAttr(Gf.Vec2f(0.01 / smpu, 1000.0 / smpu))
+        pr = cam.GetPrim()
+        v = Gf.Vec3d(*_AXES[look or face])
+        up = Gf.Vec3d(0, 0, 1) if abs(v[2]) < 0.9 else Gf.Vec3d(0, 1, 0)
+        zc = -v                                    # a USD camera looks down its local -Z
+        xcv = Gf.Cross(up, zc).GetNormalized()
+        ycv = Gf.Cross(zc, xcv)
+        R = _rpy(rpy) * _basis(xcv, ycv, zc)
+        pos = anchor + n * (gap * to_link) + Gf.Vec3d(*offset) * to_link
+        xf = UsdGeom.Xformable(pr); xf.ClearXformOpOrder()
+        xf.AddTransformOp().Set(R * Gf.Matrix4d().SetTranslate(pos))
+    else:
+        pr = st.DefinePrim(path, "Xform")
+        pr.GetReferences().AddReference(url)
+        lay = Sdf.Layer.FindOrOpen(url)
+        info = lay.pseudoRoot if lay else None
+        ampu = (info.GetInfo("metersPerUnit") if info is not None and info.HasInfo("metersPerUnit") else 0.01) or 0.01
+        upx = info.GetInfo("upAxis") if info is not None and info.HasInfo("upAxis") else "Y"
+        k = ampu / smpu / lscale
+        Ru = Gf.Matrix4d().SetRotate(Gf.Rotation(Gf.Vec3d(1, 0, 0), 90.0 if upx == "Y" else 0.0))
+        a, b = Gf.Vec3d(0, 0, -1), -n                # item bottom (-Z) turned to face the link
+        Rf = Gf.Matrix4d().SetRotate(Gf.Rotation(a, b)) if (a - b).GetLength() > 1e-9 else Gf.Matrix4d(1)
+        M = Gf.Matrix4d().SetScale(Gf.Vec3d(k, k, k)) * Ru * _rpy(rpy) * Rf
+        xf = UsdGeom.Xformable(pr); xf.ClearXformOpOrder()
+        op = xf.AddTransformOp(); op.Set(M)
+        rb = cache.ComputeRelativeBound(pr, lp).ComputeAlignedRange()  # item bounds in link-local units
+        cmin, cmax = rb.GetMin(), rb.GetMax()
+        ccen = (cmin + cmax) / 2
+        along_min = min(dot(cmin, n), dot(cmax, n))  # item's side nearest the link, along the face normal
+        lateral = ccen - n * dot(ccen, n)
+        shift = (anchor - n * dot(anchor, n)) - lateral + n * (dot(anchor, n) - along_min + gap * to_link) + Gf.Vec3d(*offset) * to_link
+        op.Set(M * Gf.Matrix4d().SetTranslate(shift))
+        cache.Clear()
+        for p in Usd.PrimRange(pr, Usd.TraverseInstanceProxies(Usd.PrimAllPrimsPredicate)):
+            if p.IsInstanceProxy():
+                continue
+            if p.HasAPI(UsdPhysics.RigidBodyAPI):
+                UsdPhysics.RigidBodyAPI(p).CreateRigidBodyEnabledAttr(False)
+            if kind == "visual" and p.HasAPI(UsdPhysics.CollisionAPI):
+                UsdPhysics.CollisionAPI(p).CreateCollisionEnabledAttr(False)
+    W = UsdGeom.XformCache().GetLocalToWorldTransform(pr)
+    loc = UsdGeom.Xformable(pr).GetLocalTransformation()
+    out = {"ok": True, "path": path, "link": link, "face": face,
+           "local_translate_m": [round(v / to_link, 4) for v in loc.ExtractTranslation()],
+           "world_position_m": [round(v * smpu, 4) for v in W.ExtractTranslation()], "follows_link": True}
+    if url == "camera":
+        out["camera_forward_world"] = [round(v, 3) for v in W.TransformDir(Gf.Vec3d(0, 0, -1)).GetNormalized()]
+    else:
+        cache.Clear()
+        rb = cache.ComputeRelativeBound(pr, lp).ComputeAlignedRange()
+        out["touch_gap_m"] = round((min(dot(rb.GetMin(), n), dot(rb.GetMax(), n)) - dot(anchor, n)) / to_link, 5)
+        wb = _bbox(pr)
+        out["world_bbox_m"] = [[round(v * smpu, 4) for v in wb.GetMin()], [round(v * smpu, 4) for v in wb.GetMax()]]
+        out["physics"] = "colliders join the link" if kind == "attach" else "visual only"
+    return out
+
+def placement_audit(scope="/World", depth=2, max_items=120, budget_s=12.0, tol_m=0.01):
+    """For each object `depth` levels below `scope`: is its bottom resting on the real surface under it?
+    gap > tol: floating; gap < -tol: sunk into its support. Uses the same ray cast as place_usd and stops at
+    budget_s (returns truncated=True) so it can never freeze Isaac Sim."""
+    st = _stage()
+    smpu = UsdGeom.GetStageMetersPerUnit(st) or 1.0
+    root = st.GetPrimAtPath(scope)
+    if not root or not root.IsValid():
+        return {"ok": False, "error": f"{scope} not found"}
+    t0 = time.time()
+    items = [root]
+    for _ in range(depth):
+        items = [c for p in items for c in p.GetChildren() if c.IsActive()]
+    rows, truncated = [], False
+    for p in items[:max_items]:
+        if time.time() - t0 > budget_s:
+            truncated = True
+            break
+        if p.IsA(UsdGeom.Camera) or p.HasAPI(UsdLux.LightAPI):
+            continue
+        b = _bbox(p)
+        if b.IsEmpty():
+            continue
+        mn, mx = b.GetMin(), b.GetMax()
+        pad = 0.01 / smpu
+        left = max(0.5, budget_s - (time.time() - t0))
+        tris, ti = _tris_world([st.GetPseudoRoot()], budget_s=min(3.0, left), exclude=str(p.GetPath()),
+                               xy_box=(mn[0] - pad, mn[1] - pad, mx[0] + pad, mx[1] + pad))
+        z, frac = rest_height(tris, mn, mx, mn[2] + 0.25 / smpu)
+        gap = None if z is None else (mn[2] - z) * smpu
+        state = "no surface below" if gap is None else ("floating" if gap > tol_m else ("sunk" if gap < -tol_m else "resting"))
+        rows.append({"path": str(p.GetPath()), "bottom_m": round(mn[2] * smpu, 4), "surface_m": None if z is None else round(z * smpu, 4),
+                     "gap_m": None if gap is None else round(gap, 4), "supported_fraction": round(frac, 2), "state": state,
+                     "mesh_truncated": ti["truncated"]})
+    bad = [r for r in rows if r["state"] in ("floating", "sunk")]
+    return {"ok": not bad, "checked": len(rows), "problems": bad[:40], "rows": rows[:max_items], "truncated": truncated,
+            "seconds": round(time.time() - t0, 2), "note": "gap = bottom minus the highest surface under the footprint (within 25 cm below)"}
 
 
 def build_room(width, depth, height=3.0, wall=0.1, root="/World/Room"):

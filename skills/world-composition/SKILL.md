@@ -37,3 +37,10 @@ estimates, then compose. After building: `isaac_physics_check` and `isaac_captur
 - Items on a table: every bbox inside the tabletop in x and y, no two footprints overlapping (5 mm tolerance), bottoms at top + 2-3 mm.
 - Appliances: no intersections with counters; check model heights (a 0.4 m "dishwasher" is a broken asset, drop it).
 - Long thin utensils point toward the diner; verify the long axis after rotation from the bbox, not from the yaw you asked for.
+
+## Placement math (0.3): set things down, don't compute heights by hand
+- `isaac_place` / `simready_place` lower an object onto the real surface under its footprint: they ray cast through the support's triangles. A bounding-box top is wrong whenever the support has something taller on it (lamp, monitor, back panel, cable) and made objects float.
+- Give `on` for tables, shelves, pedestals and mounts; without it the object lands on the floor (highest surface below 0.5 m). Pass `z` only when the height is specified.
+- Positions are solved in the parent's frame, so placing under a moved, rotated or scaled group (`/World/WarehouseScene/...`) lands at the requested world (x, y). Never write a world position into a child's local translate yourself.
+- Read the result: `bottom_m`, `rest_on_m`, `supported_fraction` (< 0.5 means it hangs off an edge) and `warning`.
+- After building, run `isaac_placement_audit` on the scope: every object should be `resting` (gap within 1 cm).

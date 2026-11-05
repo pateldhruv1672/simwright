@@ -37,3 +37,10 @@ to a path recorded in SIMWRIGHT.md.
 - Relative references resolve from the layer that authors them: a scene in `~/robotics/scenes/` referencing `../assets/usd/x.usda` means `~/robotics/assets/usd/x.usda`. Check `scene health.broken_references` after every save; prefer the exact path the importer returned.
 - UsdPhysics gravity direction (0,0,0) means "negative up axis" and a negative magnitude (even -inf) means "Earth gravity". These are valid defaults; do not call them corrupt. Set explicit values only if the user wants them.
 - `isaac_scene` → `health` reports robot-named prims with no articulation and no joints: a placeholder or a failed load, not a robot.
+
+## Mounting on robots
+- Sensors, cameras and tools that must move with a robot go under the link prim: `isaac_mount(name, url_or_'camera', link, face='+z', offset=[..], rpy=[..], look='+x')`. The face is the link's own bounds in its own frame; the item touches it (`touch_gap_m` ≈ 0) and `local_translate_m` is in the link frame.
+- Wrist camera: `isaac_mount("wrist_cam", "camera", "<arm>/link7", face="+z", look="+z")` (check which link axis points out of the flange first: read the link's local bounds and the joint axis). Verify with `camera_forward_world`.
+- A mounted asset with its own rigid body would nest inside the link's rigid body; mount disables it so its colliders join the link.
+## Never freeze Kit
+- Code sent to Isaac Sim runs on Kit's main thread: an unbounded loop over a big stage freezes the UI until it ends (a scan of a warehouse once hung it for over 20 minutes). Bound prim counts, check a time budget, prefer the built-in helpers (they stop on their own).

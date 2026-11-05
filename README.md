@@ -233,6 +233,28 @@ Every subcommand prints JSON, so scripts and agents can use the CLI directly.
 
 **SimReady assets.** Search and package manifests come from the public SimReady Central API; files download straight from the contributor's Hugging Face dataset at the indexed revision into `~/.simwright/simready/<org>__<dataset>/<revision>/`. Set `HF_TOKEN` for gated datasets. NVIDIA's own assets are CC-BY-4.0: attribute them when you publish.
 
+## Project memory
+
+Each workspace keeps its own memory in `.simwright/`, shared by the Isaac Sim panel, the terminal copilot and MCP clients:
+
+| File | What |
+|---|---|
+| `notes.md` | dated notes: decisions, saved stage paths, conventions, next steps. Edit it by hand too. |
+| `conversation.json` | the current panel / terminal conversation, restored after restarts |
+| `history/` | archived conversations; **New chat** (panel) or `/new` (terminal) summarizes the old one into `notes.md` first |
+| `session.jsonl` | every file written, command run and scene change |
+| `panel_events.jsonl` | what the panel shows when it opens |
+
+MCP clients get the same memory through the `project_memory` and `project_note` tools.
+
+## Placement and mounting
+
+Objects are set down the way a person would: `isaac_place` / `simready_place` lower the object onto the **real surface under its footprint** (a ray cast through the support's triangles), so a lamp or a back panel on a table can't lift it, a raised floor is respected, and placement inside moved or scaled groups lands at the requested world position. `isaac_mount` attaches cameras, sensors and tools to a robot link so they move with it, touching the chosen face of the link. `isaac_placement_audit` reports anything floating or sunk, with the exact gap.
+
+```powershell
+simwright isaac exec check.py      # or ask: "audit placement under /World/Warehouse"
+```
+
 ## Configuration
 
 `simwright config` prints everything; `simwright config <key> <value>` sets one key (dotted keys for nested values).
