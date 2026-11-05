@@ -959,3 +959,11 @@ def test_teleop_extension_copies_match_sources():
     root = pathlib.Path(__file__).resolve().parents[1]
     for m in ("rokoko", "retarget_g1", "onnx_np"):
         assert (root / f"src/simwright/{m}.py").read_text() == (root / f"kit_exts/simwright.copilot/simwright/copilot/teleop/{m}.py").read_text(), m
+
+
+
+def test_cli_teleop_and_rokoko_commands_exist(tmp_path, capsys):
+    from simwright import cli
+    cli.main(["--root", str(tmp_path), "rokoko", "listen", "0.3"])
+    out = capsys.readouterr().out
+    assert '"frames": 0' in out and "Custom" in out

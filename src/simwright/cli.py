@@ -340,7 +340,7 @@ def main(argv=None):
     p.add_argument("action", choices=["key", "status", "setup", "search"]); p.add_argument("query", nargs="*"); p.add_argument("--kind", default="code")
     p = sub.add_parser("serve"); p.add_argument("--port", type=int)
     p = sub.add_parser("chat"); p.add_argument("prompt", nargs="+"); p.add_argument("--mode", default=None)
-    for name in ("ros", "urdf", "build", "mujoco", "gazebo", "isaac", "world", "lab", "simready"):
+    for name in ("ros", "urdf", "build", "mujoco", "gazebo", "isaac", "world", "lab", "simready", "teleop", "rokoko"):
         p = sub.add_parser(name); p.add_argument("rest", nargs=argparse.REMAINDER)
     a = ap.parse_args(argv)
     root = context.find_root(a.root, exact=bool(a.root))
