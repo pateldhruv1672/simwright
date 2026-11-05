@@ -50,3 +50,9 @@ to a path recorded in SIMWRIGHT.md.
 - Never turn on CCD to "fix" tunnelling on a GPU scene; raise the solver iterations or the physics rate, or thicken thin colliders instead.
 - Every check backs up the stage (with unsaved edits) to `~/.simwright/backups/` before playing. If Isaac Sim dies, the result says `crashed: true` with the backup path: relaunch, open the backup, fix the preflight issues, then check again.
 
+## Teleoperation (Rokoko -> G1, verified Nov 4 2026 in Isaac Sim 6.0.1)
+- Tools: teleop_scene, teleop_start, teleop_calibrate, teleop_status, teleop_command, teleop_stop, rokoko_listen. Read status, never assume.
+- Physics views: use Isaac Sim 6's `SimulationManager.get_physics_sim_view()` after Play, on an app-update tick. Creating your own view (or creating it in a physics-step callback) floods "Failed to get a valid attached USD stage id" and hung Kit once.
+- A single humanoid on a simple floor: CPU physics (MBP broadphase) ran ~2x faster than GPU dynamics + CPU readback. The full warehouse ran ~0.3x real time with the robot awake.
+- Writing joint targets keeps an articulation awake; awake G1 + Revo2 costs ~12-16 ms/step on GPU dynamics. Measure realtime_factor before judging a controller.
+- Module reloads orphan running sessions: the runtime keeps sessions on `sys` and stops leftovers on start.

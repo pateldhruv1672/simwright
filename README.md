@@ -37,6 +37,28 @@ agent > imports the G1 URDF, tunes drives, places SimReady assets on the tableto
 
 ---
 
+
+## Full-body teleoperation: Rokoko suit + gloves -> Unitree G1 (WBC-AGILE legs)
+
+Drive the G1 (29 DoF + BrainCo Revo2 hands) in Isaac Sim from a Rokoko Smartsuit Pro and Smartgloves. The legs run NVIDIA's
+[WBC-AGILE](https://github.com/nvidia-isaac/WBC-AGILE) velocity-height policy (Apache-2.0, bundled as a NumPy graph verified
+against onnxruntime), so the robot balances and walks on its own; waist, arms and hands follow you.
+
+1. Rokoko Studio: connect suit and gloves, calibrate them in Studio. Livestreaming > Custom > settings: Include connection,
+   UDP, data format **JSON v3** (or v4), forward IP `127.0.0.1`, port `14043`, then Activate. (Custom streaming needs a Rokoko
+   Plus/Pro plan.) Check with `simwright rokoko listen`.
+2. `simwright teleop scene` (optional): a light scene with the G1 and a table; heavy scenes run below real time.
+3. `simwright teleop start` (add `--no-walk` to keep the base pinned and drive only the upper body).
+4. Stand like the robot's zero pose: upper arms at your sides, elbows bent 90 degrees, forearms forward, palms facing each
+   other, fingers straight. Run `simwright teleop calibrate`.
+5. Move. Arms, waist and fingers follow. Step about 15 cm away from where you calibrated to walk that way, turn your hips
+   past ~20 degrees to turn, squat to lower the robot. Step back to the spot to stop.
+
+`simwright teleop status` shows the stream (fps, gloves), calibration, walk command, pelvis height, tilt and real-time factor.
+`simwright teleop walk 0.4 0 0` drives the legs without the suit; `simwright teleop suit` hands walking back.
+`simwright rokoko fake` streams a synthetic performer (same JSON as Studio) to test everything without a suit.
+`simwright teleop stop` stops the simulation and restores the world pin and physics rate (all changes are session-layer only).
+
 ## Requirements
 
 | | Needed for | Notes |
