@@ -12,7 +12,7 @@ except ImportError:  # imported outside Kit (tests): definitions only
 _ASSET_CACHE = globals().get("_ASSET_CACHE") or {}
 
 
-HELPERS_VERSION = "0.2.2"
+HELPERS_VERSION = "0.2.3"
 
 
 def _stage():
@@ -40,12 +40,22 @@ def scene_summary(max_list=40):
     if st is None:
         return {"stage": None}
     counts, lights, arts, cams, scenes, rigid = {}, [], [], [], [], 0
+    all_joints = []
+    for j in st.Traverse(Usd.TraverseInstanceProxies(Usd.PrimAllPrimsPredicate)) if hasattr(st, "Traverse") else []:
+        if j.IsA(UsdPhysics.Joint):
+            jj = UsdPhysics.Joint(j)
+            tg = [str(x) for x in (jj.GetBody0Rel().GetTargets() + jj.GetBody1Rel().GetTargets())]
+            all_joints.append((str(j.GetPath()), tg))
     for p in st.Traverse():
         t = p.GetTypeName() or "(untyped)"
         counts[t] = counts.get(t, 0) + 1
         if p.HasAPI(UsdPhysics.ArticulationRootAPI):
-            joints = [c for c in Usd.PrimRange(p, Usd.TraverseInstanceProxies(Usd.PrimAllPrimsPredicate)) if c.IsA(UsdPhysics.Joint)]
-            arts.append({"path": str(p.GetPath()), "joints": len(joints)})
+            root = str(p.GetPath())
+            # an articulation root applied to a joint (NVIDIA xArm assets) spans its robot folder; importers may also
+            # put joints in a sibling /Physics scope, so match joints by the bodies they connect
+            scope = str(p.GetParent().GetPath()) if p.IsA(UsdPhysics.Joint) and p.GetParent() else root
+            n = sum(1 for jp, tg in all_joints if jp == root or jp.startswith(scope + "/") or any(x == scope or x.startswith(scope + "/") for x in tg))
+            arts.append({"path": root, "joints": n})
         if p.HasAPI(UsdPhysics.RigidBodyAPI):
             rigid += 1
         if t.endswith("Light"):
