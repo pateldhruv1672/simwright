@@ -4,7 +4,7 @@ The same tools are reachable from Mana (through Mana Bridge) and from MCP client
 running Simwright standalone or inside CI.
 """
 from __future__ import annotations
-import base64, json, mimetypes, os, pathlib, platform, sys
+import base64, json, time, mimetypes, os, pathlib, platform, sys
 from . import config, context, skills
 from .tools import Toolbox
 
@@ -47,14 +47,38 @@ def build_system(root: pathlib.Path, toolbox: Toolbox, prompt: str) -> str:
     return "\n".join(parts)
 
 
+def model_endpoint(cfg: dict) -> tuple[str, str]:
+    """(api key, base url). Your own key wins; otherwise the Mana relay written by Mana to ~/.simwright/mana.json."""
+    key = os.environ.get("SIMWRIGHT_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    if key:
+        return key, cfg.get("base_url") or os.environ.get("SIMWRIGHT_BASE_URL") or ""
+    m = mana_relay()
+    if m and not m.get("expired"):
+        return m["token"], m["base_url"]
+    return "", ""
+
+
+def mana_relay() -> dict | None:
+    p = config.HOME / "mana.json"
+    try:
+        m = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not m.get("token") or not m.get("base_url"):
+        return None
+    m["expired"] = bool(m.get("expires") and time.time() > m["expires"])
+    return m
+
+
 class Agent:
     def __init__(self, root: pathlib.Path, toolbox: Toolbox, emit=None, model: str | None = None):
         from openai import OpenAI
         cfg = config.load()
-        key = os.environ.get("SIMWRIGHT_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        key, base = model_endpoint(cfg)
         if not key:
-            raise RuntimeError("set SIMWRIGHT_API_KEY (and SIMWRIGHT_BASE_URL for non-OpenAI endpoints), or drive Simwright from Mana via Mana Bridge")
-        self.client = OpenAI(api_key=key, base_url=cfg.get("base_url") or os.environ.get("SIMWRIGHT_BASE_URL") or None)
+            raise RuntimeError("No model connected. In Mana, say \"connect Simwright to Mana models\" (no API key needed), "
+                               "or set SIMWRIGHT_API_KEY (and SIMWRIGHT_BASE_URL for non-OpenAI endpoints).")
+        self.client = OpenAI(api_key=key, base_url=base or None)
         self.model = model or cfg.get("model")
         self.root, self.tb = root, toolbox
         self.emit = emit or self._print

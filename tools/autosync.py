@@ -97,6 +97,11 @@ def run(uid, console_path, firebase):
     if skills:
         upd["skills"] = skills
     firebase.update(base + "/data/capabilities", upd)
+    try:  # keep the PC's Mana model link fresh (best effort: the PC may be offline)
+        import relay_login
+        state["relay"] = relay_login.push()
+    except Exception as e:
+        state["relay"] = {"ok": False, "error": str(e)[:300]}
     state.update(ok=True, step="done", version=ver, head=head, committed=dirty, published=published, src_hash=sh_,
                  pushed=("Everything up-to-date" not in o3))
     firebase.write(base + "/state/autosync", state)

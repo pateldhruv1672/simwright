@@ -22,7 +22,7 @@ DEFAULTS = {
     "isaac_lab_dir": os.environ.get("ISAAC_LAB_DIR", ""),
     "python_server": {"host": "127.0.0.1", "port": 8226, "token": ""},
     "approval": "auto",            # auto | step | ask
-    "model": os.environ.get("SIMWRIGHT_MODEL", "gpt-4.1"),
+    "model": os.environ.get("SIMWRIGHT_MODEL", "gpt-5.4"),
     "base_url": os.environ.get("SIMWRIGHT_BASE_URL", ""),
     "serve_port": 8787,
     "lab": {

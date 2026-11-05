@@ -1,5 +1,6 @@
 """Environment checks for a Windows + WSL + Docker physical-AI workstation (also works on Linux)."""
 from __future__ import annotations
+import time
 import os, pathlib, re, subprocess
 from . import config
 from .isaac import KitClient, KitError, find_isaac_sim
@@ -76,6 +77,17 @@ def run_doctor(runner: Runner | None = None, deep: bool = False) -> dict:
         add(f"ROS 2 ({t.key})", ok, (f"{distro} · " if distro else "") + (", ".join(tools) or "ros2 not on PATH"), "install ROS 2 (Jazzy on Ubuntu 24.04) in WSL, or set targets.ros to a Docker container; Isaac Sim 6 also supports native Windows ROS 2 via Pixi")
     except Exception as e:
         add("ROS 2", False, str(e))
+    from .agent import model_endpoint, mana_relay
+    key, _ = model_endpoint(cfg)
+    m = mana_relay()
+    if os.environ.get("SIMWRIGHT_API_KEY") or os.environ.get("OPENAI_API_KEY"):
+        add("Model", True, "your own API key (SIMWRIGHT_API_KEY / OPENAI_API_KEY)")
+    elif m and not m.get("expired"):
+        days = int((m.get("expires", 0) - time.time()) / 86400) if m.get("expires") else None
+        add("Model", True, f"Mana models via relay ({cfg.get('model')})" + (f", renews automatically; current link valid {days} more days" if days is not None else ""))
+    else:
+        add("Model", False, "relay link expired" if m else "not connected",
+            "in Mana say: connect Simwright to Mana models (no API key needed); or setx SIMWRIGHT_API_KEY <key>")
     bridge = pathlib.Path.home() / ".mana-terminal"
     add("Mana Bridge", bridge.exists(), "paired" if (bridge / "config.json").exists() else ("installed" if bridge.exists() else "not installed"),
         "open Mana Bridge in Mana and run its Windows install line, then type `mana` in your robot workspace")

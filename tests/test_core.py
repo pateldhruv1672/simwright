@@ -344,3 +344,26 @@ def test_output_dir_avoids_system32(tmp_path, monkeypatch):
     tb.root = tmp_path
     assert tb._out(".simwright/captures/f.png") == tmp_path / ".simwright/captures/f.png"
     assert tb._out("/abs/x.png") == pathlib.Path("/abs/x.png")
+
+
+def test_model_endpoint(tmp_path, monkeypatch):
+    import time as _t
+    from simwright import agent
+    monkeypatch.setattr(config, "HOME", tmp_path)
+    for v in ("SIMWRIGHT_API_KEY", "OPENAI_API_KEY", "SIMWRIGHT_BASE_URL"):
+        monkeypatch.delenv(v, raising=False)
+    cfg = config._merge(config.DEFAULTS, {})
+    assert agent.model_endpoint(cfg) == ("", "")
+    (tmp_path / "mana.json").write_text(json.dumps({"base_url": "https://relay/v1", "token": "t0k", "expires": _t.time() + 99}))
+    assert agent.model_endpoint(cfg) == ("t0k", "https://relay/v1")
+    (tmp_path / "mana.json").write_text(json.dumps({"base_url": "https://relay/v1", "token": "t0k", "expires": _t.time() - 1}))
+    assert agent.model_endpoint(cfg) == ("", "")
+    monkeypatch.setenv("SIMWRIGHT_API_KEY", "own")
+    assert agent.model_endpoint(cfg)[0] == "own"
+
+
+def test_every_module_imports():
+    import importlib, pkgutil, simwright
+    for m in pkgutil.iter_modules(simwright.__path__):
+        if m.name not in ("kit_helpers",):
+            importlib.import_module(f"simwright.{m.name}")
