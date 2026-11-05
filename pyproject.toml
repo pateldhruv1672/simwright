@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "simwright"
-version = "0.1.4"
+version = "0.2.0"
 description = "AI copilot for robot simulation: Isaac Sim, Isaac Lab, ROS 2, Gazebo and MuJoCo on Windows, WSL and Docker."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -22,3 +22,6 @@ packages = ["src/simwright"]
 "skills" = "simwright/_data/skills"
 "kit_exts" = "simwright/_data/kit_exts"
 "install" = "simwright/_data/install"
+
+[dependency-groups]
+dev = ["pytest>=8"]

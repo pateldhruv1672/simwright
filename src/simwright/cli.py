@@ -175,6 +175,9 @@ def dispatch(tb, c, rest):
         return tb.mujoco_check(a[0])
     if c == "gazebo":
         return tb.gazebo_check(a[0])
+    if c == "isaac" and a[0] == "ext-path":
+        return {"ok": True, "path": str(config.DATA / "kit_exts"), "extension": "simwright.copilot",
+                "how": "Isaac Sim > Window > Extensions > Settings > Extension Search Paths: add this path, then enable simwright.copilot"}
     if c == "isaac":
         sub = a[0] or "status"
         return {"launch": lambda: tb.isaac_launch("--headless" in rest), "status": tb.isaac_status, "scene": tb.isaac_scene,
