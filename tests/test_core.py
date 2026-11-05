@@ -722,3 +722,19 @@ def test_physics_repair_fixes_overrides_only(tmp_path):
         assert f.read_text() == before                            # the robot asset file is untouched
     finally:
         kh._TEST_STAGE = None
+
+
+
+def test_physics_repair_skips_mimic_followers(tmp_path):
+    from pxr import UsdPhysics, UsdGeom
+    kh, st = _helpers_with_stage()
+    try:
+        for b in ("a", "b"):
+            UsdPhysics.RigidBodyAPI.Apply(UsdGeom.Xform.Define(st, f"/World/g/{b}").GetPrim())
+        j = UsdPhysics.RevoluteJoint.Define(st, "/World/g/follower_finger_joint")
+        j.CreateBody0Rel().SetTargets(["/World/g/a"]); j.CreateBody1Rel().SetTargets(["/World/g/b"])
+        j.GetPrim().AddAppliedSchema("PhysxMimicJointAPI:rotZ")
+        r = kh.physics_repair("/World", apply=True)
+        assert not any(c["prim"].endswith("follower_finger_joint") for c in r["details"])
+    finally:
+        kh._TEST_STAGE = None

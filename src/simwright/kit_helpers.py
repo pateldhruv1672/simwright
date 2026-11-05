@@ -17,7 +17,7 @@ _TEST_STAGE = None
 _ASSET_CACHE = globals().get("_ASSET_CACHE") or {}
 
 
-HELPERS_VERSION = "0.3.2"
+HELPERS_VERSION = "0.3.3"
 
 
 def _stage():
@@ -355,7 +355,8 @@ def physics_repair(scope="/World", apply=False, mass_floor=0.02, solver=(32, 4),
         if time.time() - t0 > budget_s:
             truncated = True
             break
-        if p.IsA(UsdPhysics.RevoluteJoint) or p.IsA(UsdPhysics.PrismaticJoint):
+        if (p.IsA(UsdPhysics.RevoluteJoint) or p.IsA(UsdPhysics.PrismaticJoint)) and not any("Mimic" in str(a) for a in p.GetAppliedSchemas()):
+            # mimic followers copy another joint: a drive on them fights the mimic constraint
             kind = "angular" if p.IsA(UsdPhysics.RevoluteJoint) else "linear"
             k = _attr(p, f"drive:{kind}:physics:stiffness", 0.0) or 0.0
             d = _attr(p, f"drive:{kind}:physics:damping", 0.0) or 0.0
