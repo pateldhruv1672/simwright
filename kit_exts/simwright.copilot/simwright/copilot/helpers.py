@@ -17,7 +17,7 @@ _TEST_STAGE = None
 _ASSET_CACHE = globals().get("_ASSET_CACHE") or {}
 
 
-HELPERS_VERSION = "0.5.0"
+HELPERS_VERSION = "0.5.3"
 
 
 def _stage():
@@ -615,6 +615,58 @@ def teleop_g1_command(vx=0.0, vy=0.0, wz=0.0, h=None, clear=False):
 
 def teleop_g1_stop():
     return _teleop_rt().stop()
+
+
+def teleop_scene_g1(path, asset, table=True, save=True):
+    """A light scene for real-time teleop: ground, lights, the G1 asset (pinned until teleop releases it), a table with
+    graspable objects. GPU dynamics, 200 Hz, articulation solver 8/4 (what WBC-AGILE trained with)."""
+    import omni.usd
+    from pxr import Usd, UsdGeom, UsdPhysics, UsdLux, PhysxSchema, Gf, Sdf
+    ctx = omni.usd.get_context()
+    ctx.new_stage()
+    st = ctx.get_stage()
+    UsdGeom.SetStageUpAxis(st, UsdGeom.Tokens.z); UsdGeom.SetStageMetersPerUnit(st, 1.0)
+    world = UsdGeom.Xform.Define(st, "/World"); st.SetDefaultPrim(world.GetPrim())
+    scene = UsdPhysics.Scene.Define(st, "/World/PhysicsScene")
+    scene.CreateGravityDirectionAttr(Gf.Vec3f(0, 0, -1)); scene.CreateGravityMagnitudeAttr(9.81)
+    ps = PhysxSchema.PhysxSceneAPI.Apply(scene.GetPrim())
+    ps.CreateEnableGPUDynamicsAttr(True); ps.CreateBroadphaseTypeAttr("GPU"); ps.CreateSolverTypeAttr("TGS"); ps.CreateTimeStepsPerSecondAttr(200)
+    ps.CreateEnableCCDAttr(False)
+    g = UsdGeom.Cube.Define(st, "/World/Ground"); g.CreateSizeAttr(1.0)
+    UsdGeom.XformCommonAPI(g).SetScale(Gf.Vec3f(40, 40, 0.1)); UsdGeom.XformCommonAPI(g).SetTranslate(Gf.Vec3d(0, 0, -0.05))
+    g.CreateDisplayColorAttr([Gf.Vec3f(0.42, 0.43, 0.45)])
+    UsdPhysics.CollisionAPI.Apply(g.GetPrim())
+    mat = UsdShade_material = None
+    UsdLux.DomeLight.Define(st, "/World/Dome").CreateIntensityAttr(900)
+    d = UsdLux.DistantLight.Define(st, "/World/Sun"); d.CreateIntensityAttr(2500); UsdGeom.XformCommonAPI(d).SetRotate(Gf.Vec3f(-45, 0, 30))
+    robot = st.DefinePrim("/World/G1", "Xform")
+    robot.GetReferences().AddReference(asset)
+    UsdGeom.XformCommonAPI(robot).SetTranslate(Gf.Vec3d(0, 0, 0))
+    objects = []
+    if table:
+        def box(path, size, pos, color, dynamic=False, mass=None):
+            c = UsdGeom.Cube.Define(st, path); c.CreateSizeAttr(1.0)
+            UsdGeom.XformCommonAPI(c).SetScale(Gf.Vec3f(*size)); UsdGeom.XformCommonAPI(c).SetTranslate(Gf.Vec3d(*pos))
+            c.CreateDisplayColorAttr([Gf.Vec3f(*color)])
+            UsdPhysics.CollisionAPI.Apply(c.GetPrim())
+            if dynamic:
+                UsdPhysics.RigidBodyAPI.Apply(c.GetPrim()); UsdPhysics.MassAPI.Apply(c.GetPrim()).CreateMassAttr(mass or 0.2)
+            objects.append(path)
+        box("/World/Table/Top", (0.6, 1.0, 0.04), (0.55, 0, 0.74), (0.55, 0.42, 0.3))
+        for i, (x, y) in enumerate(((0.3, 0.45), (0.3, -0.45), (0.8, 0.45), (0.8, -0.45))):
+            box(f"/World/Table/Leg{i}", (0.04, 0.04, 0.72), (x, y, 0.36), (0.3, 0.3, 0.3))
+        box("/World/Objects/Cube", (0.05, 0.05, 0.05), (0.42, 0.12, 0.785), (0.91, 0.4, 0.29), True, 0.1)
+        box("/World/Objects/Block", (0.04, 0.12, 0.04), (0.45, -0.15, 0.78), (0.2, 0.5, 0.75), True, 0.15)
+        box("/World/Objects/Bin", (0.16, 0.2, 0.06), (0.62, 0.0, 0.79), (0.3, 0.6, 0.35), True, 0.4)
+    for p in st.Traverse():
+        if p.HasAPI(UsdPhysics.ArticulationRootAPI):
+            a = PhysxSchema.PhysxArticulationAPI.Apply(p)
+            a.CreateSolverPositionIterationCountAttr(8); a.CreateSolverVelocityIterationCountAttr(4)
+    if save:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        st.GetRootLayer().Export(path)
+        ctx.open_stage(path)
+    return {"ok": True, "path": path, "asset": asset, "objects": objects}
 
 
 def _marker_path():

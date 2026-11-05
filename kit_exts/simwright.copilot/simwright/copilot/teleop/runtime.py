@@ -174,6 +174,10 @@ class G1Teleop:
         self.idx0 = self.torch.tensor([0], dtype=self.torch.int32, device=self.dev) if self.backend == "torch" else np.array([0], dtype=np.int32)
         kp = self._np(g_raw); kd = self._np(self.art.get_dof_dampings())
         kp[0, self.pol_idx] = self.desc["default_joint_stiffness"]; kd[0, self.pol_idx] = self.desc["default_joint_damping"]
+        self.hand_idx = np.array([i for n, i in self.dof.items() if n.endswith(("_metacarpal_joint", "_proximal_joint")) and any(f in n for f in ("thumb", "index", "middle", "ring", "pinky"))], dtype=int)
+        if self.hands and len(self.hand_idx):
+            weak = kp[0, self.hand_idx] < 1.0                          # raw Revo2 asset ships limp finger drives
+            kp[0, self.hand_idx[weak]] = 5.0; kd[0, self.hand_idx[weak]] = 0.5
         self.art.set_dof_stiffnesses(self._t(kp, gain=True), self.idx0); self.art.set_dof_dampings(self._t(kd, gain=True), self.idx0)
         self.targets = self._np(self.art.get_dof_position_targets())
         q = self._np(q_raw)
@@ -285,7 +289,7 @@ class G1Teleop:
         except Exception:
             sim_t = None
         return {"running": self.sub is not None, "bound": self.art is not None, "sim_time": round(sim_t, 2) if sim_t is not None else None,
-                "wall_time": round(el, 2), "physics_hz_measured": round(self.steps / el, 1) if el else 0, "robot": self.robot, "walk": self.walk, "physics_hz": self.physics_hz, "decimation": self.decim,
+                "wall_time": round(el, 2), "realtime_factor": round(sim_t / el, 2) if (sim_t and el) else None, "physics_hz_measured": round(self.steps / el, 1) if el else 0, "robot": self.robot, "walk": self.walk, "physics_hz": self.physics_hz, "decimation": self.decim,
                 "released_pins": getattr(self, "pins", []), "physics_steps": self.steps, "policy_steps": self.policy_steps,
                 "policy_hz": round(self.policy_steps / el, 1) if el else 0, "policy_ms": round(self.last_policy_ms, 2), "retarget_ms": round(self.last_retarget_ms, 2),
                 "bind_tries": getattr(self, "bind_tries", 0), "bind_error": getattr(self, "last_bind_error", None), "backend": getattr(self, "backend", None),

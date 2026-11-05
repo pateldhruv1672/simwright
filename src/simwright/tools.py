@@ -327,6 +327,17 @@ class Toolbox:
             return {"ok": False, "skipped": True}
         return self.kit.call(f"teleop_g1_start({(robot or None)!r}, {int(port)}, {bool(walk)}, {int(physics_hz)}, {(actor or None)!r})", timeout=120)
 
+    @tool("Create and open a light scene for real-time G1 teleoperation (ground, lights, the G1 + Revo2 asset, a table with "
+          "graspable objects; GPU dynamics, 200 Hz, AGILE's 8/4 solver). Heavy scenes such as a full warehouse can run far below "
+          "real time; teleop_status reports realtime_factor.")
+    def teleop_scene(self, path: str = "", asset: str = "") -> dict:
+        home = os.path.expanduser("~")
+        path = path or os.path.join(home, "robotics", "scenes", "teleop_g1.usd")
+        asset = asset or os.path.join(home, "robotics", "assets", "usd", "g1_revo2", "g1_revo2_pelvis_root", "g1_revo2_pelvis_root.usda")
+        if self.runner.approver.decide("host", f"create and open the teleop scene {path} (the current stage is closed)", "") != "run":
+            return {"ok": False, "skipped": True}
+        return self.kit.call(f"teleop_scene_g1({path!r}, {asset!r})", timeout=180)
+
     @tool("Calibrate teleoperation on the next Rokoko frame. The performer must stand in the G1 zero pose: upright, upper arms "
           "at the sides, elbows bent 90 degrees with forearms forward, palms facing each other, fingers straight. Walking is "
           "measured from where they stand now.")

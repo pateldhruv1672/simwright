@@ -870,7 +870,7 @@ def test_kit_call_expressions_are_python(tmp_path, monkeypatch):
     tb.ros_bridge_graph(robots=["/World/r"], cameras=["/World/cam"], persist=True)
     tb.isaac_physics_repair("/World")
     tb.isaac_placement_audit("/World")
-    tb.teleop_start(); tb.teleop_start(walk=False, robot="/World/G1", actor="Dimitris"); tb.teleop_command(0.3, 0, 0.2); tb.teleop_calibrate(); tb.teleop_status(); tb.teleop_stop()
+    tb.teleop_scene(); tb.teleop_start(); tb.teleop_start(walk=False, robot="/World/G1", actor="Dimitris"); tb.teleop_command(0.3, 0, 0.2); tb.teleop_calibrate(); tb.teleop_status(); tb.teleop_stop()
     assert len(sent) >= 9 and not any(" null" in s or "(null" in s for s in sent)
 
 

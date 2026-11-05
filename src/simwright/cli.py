@@ -192,6 +192,8 @@ def dispatch(tb, c, rest):
             return tb.teleop_command(vx, vy, wz, h)
         if sub == "suit":
             return tb.teleop_command(clear=True)
+        if sub == "scene":
+            return tb.teleop_scene(next((x for x in rest[1:] if x.lower().endswith((".usd", ".usda"))), ""))
         return {"calibrate": tb.teleop_calibrate, "status": tb.teleop_status, "stop": tb.teleop_stop}.get(sub, tb.teleop_status)()
     if c == "rokoko":
         sub = a[0] or "listen"
