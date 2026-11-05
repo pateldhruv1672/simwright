@@ -13,6 +13,7 @@
   simwright status --json   machine summary (used by the Mana console)
 """
 from __future__ import annotations
+import re
 import argparse, json, os, pathlib, shlex, subprocess, sys
 from . import __version__, config, context, skills
 from .approval import Approver
@@ -179,6 +180,31 @@ def repl(root):
 def dispatch(tb, c, rest):
     """Shared by the REPL and argparse subcommands."""
     a = rest + [""] * 4
+    if c == "teleop":
+        sub = a[0] or "status"
+        nums = [float(x) for x in rest[1:] if re.match(r"^-?\d+(\.\d+)?$", x)]
+        if sub == "start":
+            port = next((int(x.split("=", 1)[1]) for x in rest if x.startswith("--port=")), 14043)
+            hz = next((int(x.split("=", 1)[1]) for x in rest if x.startswith("--hz=")), 200)
+            return tb.teleop_start(walk="--no-walk" not in rest, port=port, physics_hz=hz)
+        if sub == "walk":
+            vx, vy, wz, h = (nums + [0.0, 0.0, 0.0, 0.72][len(nums):])[:4]
+            return tb.teleop_command(vx, vy, wz, h)
+        if sub == "suit":
+            return tb.teleop_command(clear=True)
+        return {"calibrate": tb.teleop_calibrate, "status": tb.teleop_status, "stop": tb.teleop_stop}.get(sub, tb.teleop_status)()
+    if c == "rokoko":
+        sub = a[0] or "listen"
+        secs = next((float(x) for x in rest[1:] if re.match(r"^\d+(\.\d+)?$", x)), None)
+        if sub == "fake":
+            from . import rokoko_fake
+            print("streaming a synthetic performer to 127.0.0.1:14043 (Ctrl+C stops)", flush=True)
+            return rokoko_fake.stream(seconds=secs or 40.0, version=4 if "--v4" in rest else 3, loop="--loop" in rest)
+        if sub == "calibrate":
+            from . import rokoko
+            key = next((x.split("=", 1)[1] for x in rest if x.startswith("--key=")), "1234")
+            return rokoko.command("calibrate", api_key=key)
+        return tb.rokoko_listen(secs or 3.0)
     if c == "ros" and a[0] == "bridge":
         sub = a[1] or "check"
         dom = next((int(x.split("=", 1)[1]) for x in rest if x.startswith("--domain=")), -1)

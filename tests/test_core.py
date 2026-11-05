@@ -870,4 +870,92 @@ def test_kit_call_expressions_are_python(tmp_path, monkeypatch):
     tb.ros_bridge_graph(robots=["/World/r"], cameras=["/World/cam"], persist=True)
     tb.isaac_physics_repair("/World")
     tb.isaac_placement_audit("/World")
+    tb.teleop_start(); tb.teleop_start(walk=False, robot="/World/G1", actor="Dimitris"); tb.teleop_command(0.3, 0, 0.2); tb.teleop_calibrate(); tb.teleop_status(); tb.teleop_stop()
     assert len(sent) >= 9 and not any(" null" in s or "(null" in s for s in sent)
+
+
+
+def test_rokoko_parse_both_formats_and_retarget_ground_truth():
+    import numpy as np
+    from simwright import rokoko as rk, rokoko_fake as rf, retarget_g1 as rg
+    for ver in (3, 4):
+        r = rg.G1Retarget(); errs = []
+        for i, t in enumerate(np.arange(0, 11, 0.02)):
+            f = rk.parse(rk.decode(rf.frame_json(float(t), ver)))
+            assert f["format"] == f"json-v{ver}"
+            j = f["actors"][0]["joints"]
+            if i == 0:
+                assert not rg.G1Retarget.needed(j); r.calibrate(j); continue
+            o = r.update(j, 0.02)
+            if t > 3:
+                gt = rf.pose(float(t))
+                for s in ("left", "right"):
+                    q = np.array([o["targets"][n] for n in rg.JOINTS[s]])
+                    _, _, w1, R1 = rg.arm_fk(s, q); _, _, w2, R2 = rg.arm_fk(s, gt["q"][s])
+                    errs.append(np.linalg.norm(w1 - w2))
+        assert np.median(errs) < 0.008 and np.percentile(errs, 95) < 0.02
+
+
+def test_retarget_waist_hands_and_walk_commands():
+    import numpy as np
+    from simwright import rokoko as rk, rokoko_fake as rf, retarget_g1 as rg
+    r = rg.G1Retarget(); seen = {}
+    for i, t in enumerate(np.arange(0, 28, 0.02)):
+        j = rk.parse(rk.decode(rf.frame_json(float(t), 3)))["actors"][0]["joints"]
+        if i == 0:
+            r.calibrate(j); continue
+        o = r.update(j, 0.02)
+        for key, tt in (("still", 2.0), ("waist", 9.0), ("fist", 12.5), ("squat", 15.5), ("step", 20.0), ("turn", 25.5)):
+            if abs(t - tt) < 0.011:
+                seen[key] = o
+    assert seen["still"]["cmd"] == {"vx": 0.0, "vy": 0.0, "wz": 0.0, "h": 0.72}
+    assert abs(seen["waist"]["targets"]["waist_yaw_joint"] - 0.4) < 0.03 and abs(seen["waist"]["targets"]["waist_pitch_joint"] - 0.15) < 0.03
+    assert seen["fist"]["targets"]["right_index_proximal_joint"] > 1.0 and seen["fist"]["targets"]["left_pinky_proximal_joint"] > 1.0
+    assert seen["still"]["targets"].get("right_index_proximal_joint", 0) < 0.05
+    assert seen["squat"]["cmd"]["h"] < 0.6 and seen["step"]["cmd"]["vx"] > 0.2 and seen["turn"]["cmd"]["wz"] > 0.3
+    for k in ("vx", "vy", "wz", "h"):
+        lo, hi = rg.CMD_LIMITS[k]
+        assert all(lo <= s["cmd"][k] <= hi for s in seen.values())
+
+
+def test_rokoko_lz4_message_and_coordinate_handedness():
+    import math, numpy as np, pytest
+    from simwright import rokoko as rk
+    s = math.sin(math.pi / 4)
+    _, R = rk.to_robot({"x": 0, "y": 0, "z": 0}, {"x": 0, "y": s, "z": 0, "w": s})
+    assert np.allclose(R @ [1, 0, 0], [0, -1, 0], atol=1e-9)          # Studio's turn to the right = robot's -Y
+    p, _ = rk.to_robot({"x": 1, "y": 2, "z": 3}, {"x": 0, "y": 0, "z": 0, "w": 1})
+    assert np.allclose(p, [3, -1, 2])
+    try:
+        import lz4  # noqa
+    except ImportError:
+        with pytest.raises(ValueError, match="LZ4"):
+            rk.decode(rk.LZ4_MAGIC + b"xxxx")
+
+
+def test_agile_policy_numpy_graph_stands():
+    import json, pathlib, numpy as np
+    from simwright.onnx_np import NpGraph
+    d = pathlib.Path(__file__).resolve().parents[1] / "kit_exts/simwright.copilot/simwright/copilot/teleop/data/agile_g1_velocity_height"
+    desc = json.loads((d / "descriptor.json").read_text())
+    pol = NpGraph(str(d / "policy.npz")); z = np.load(d / "initial_values.npz")
+    state = {k: z[k] for k in z.files}
+    q0 = np.array(desc["default_joint_pos"], np.float32)
+    for _ in range(10):
+        feeds = {"base_velocity": np.array([[0, 0, 0, 0.72]], np.float32), "robot_root_ang_vel_b": np.zeros((1, 3), np.float32),
+                 "robot_root_quat_w": np.array([[0, 0, 0, 1]], np.float32), "robot_joint_pos": q0[None], "robot_joint_vel": np.zeros((1, 29), np.float32), **state}
+        out = pol(feeds)
+        state = {k: out[k[:-3] + "_out"] for k in state}
+    legs = dict(zip(desc["leg_joint_names"], out["joint_pos"][0]))
+    dflt = dict(zip(desc["joint_names"], q0))
+    assert all(abs(legs[k] - dflt[k]) < 0.15 for k in legs if 'ankle' not in k)          # hips, knees near the default stance
+    assert all(-0.87 < legs[k] < 0.53 for k in legs if 'ankle_pitch' in k)              # ankles (low gains) inside joint limits
+    assert all(np.isfinite(v) for v in legs.values())
+    assert out["joint_pos_kp_gains"].shape == (1, 12) and float(out["joint_pos_kp_gains"].min()) > 0
+
+
+def test_teleop_extension_copies_match_sources():
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parents[1]
+    for m in ("rokoko", "retarget_g1", "onnx_np"):
+        assert (root / f"src/simwright/{m}.py").read_text() == (root / f"kit_exts/simwright.copilot/simwright/copilot/teleop/{m}.py").read_text(), m

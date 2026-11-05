@@ -17,7 +17,7 @@ _TEST_STAGE = None
 _ASSET_CACHE = globals().get("_ASSET_CACHE") or {}
 
 
-HELPERS_VERSION = "0.4.0"
+HELPERS_VERSION = "0.5.0"
 
 
 def _stage():
@@ -585,6 +585,36 @@ def ros_bridge_graph(robots=None, clock=True, joint_states=True, joint_commands=
             "domain_id": domain_id if domain_id is not None else os.environ.get("ROS_DOMAIN_ID", "0"),
             "topics": topics, "robots": names, "skipped": skipped, "problems": missing[:30],
             "note": "topics publish while the simulation is playing"}
+
+
+# ---------------- teleoperation (Rokoko suit + gloves -> G1, WBC-AGILE legs) ----------------
+def _teleop_rt():
+    import importlib
+    from simwright.copilot.teleop import runtime as rt, rokoko, retarget_g1, onnx_np
+    if getattr(rt, "_SESSION", None) is None:
+        for m in (rokoko, retarget_g1, onnx_np, rt):
+            importlib.reload(m)
+    return rt
+
+
+def teleop_g1_start(robot=None, port=14043, walk=True, physics_hz=200, actor=None, hands=True, arms=True):
+    return _teleop_rt().start(robot=robot, port=port, walk=walk, physics_hz=physics_hz, actor=actor, hands=hands, arms=arms)
+
+
+def teleop_g1_status():
+    return _teleop_rt().status()
+
+
+def teleop_g1_calibrate():
+    return _teleop_rt().calibrate()
+
+
+def teleop_g1_command(vx=0.0, vy=0.0, wz=0.0, h=None, clear=False):
+    return _teleop_rt().command(vx, vy, wz, h, clear)
+
+
+def teleop_g1_stop():
+    return _teleop_rt().stop()
 
 
 def _marker_path():

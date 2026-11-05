@@ -1,5 +1,6 @@
 """The toolbox: one set of robotics tools shared by the CLI agent, the MCP server and the Isaac Sim panel."""
 from __future__ import annotations
+import time
 import difflib, fnmatch, inspect, json, os, pathlib, re, time, typing
 from . import config, colcon, lab as labmod, ros2, sims, skills, urdf, world
 from .isaac import KitClient, KitError, find_isaac_sim, frames_to_mp4, launch as kit_launch
@@ -314,6 +315,54 @@ class Toolbox:
     def isaac_capture(self, path: str = ".simwright/captures/frame.png") -> dict:
         p = str(self._out(path)).replace("\\", "/")
         return self.kit.call(f"await capture({json.dumps(p)})", timeout=180)
+
+    # ---------- teleoperation: Rokoko suit + gloves -> Unitree G1 (WBC-AGILE legs) ----------
+    @tool("Start full-body teleoperation of the Unitree G1 in the open Isaac Sim scene from a Rokoko Smartsuit + Smartgloves "
+          "(Rokoko Studio > Livestreaming > Custom: UDP, JSON v3 or v4, 127.0.0.1:14043). Legs run NVIDIA's WBC-AGILE "
+          "velocity-height policy (walk by stepping away from where you calibrated, turn by turning, squat to lower); waist, arms "
+          "and Revo2 hands follow the suit and gloves. Releases the robot's world pin and raises physics to 200 Hz on the session "
+          "layer only (teleop_stop restores). walk=false keeps the base pinned and drives only the upper body.")
+    def teleop_start(self, walk: bool = True, port: int = 14043, physics_hz: int = 200, robot: str = "", actor: str = "") -> dict:
+        if self.runner.approver.decide("host", "start G1 teleoperation in Isaac Sim (stops and replays the simulation)", "") != "run":
+            return {"ok": False, "skipped": True}
+        return self.kit.call(f"teleop_g1_start({(robot or None)!r}, {int(port)}, {bool(walk)}, {int(physics_hz)}, {(actor or None)!r})", timeout=120)
+
+    @tool("Calibrate teleoperation on the next Rokoko frame. The performer must stand in the G1 zero pose: upright, upper arms "
+          "at the sides, elbows bent 90 degrees with forearms forward, palms facing each other, fingers straight. Walking is "
+          "measured from where they stand now.")
+    def teleop_calibrate(self) -> dict:
+        return self.kit.call("teleop_g1_calibrate()", timeout=30)
+
+    @tool("Teleoperation status: Rokoko stream (fps, actors, gloves, errors), calibration, walk command, policy rate and "
+          "timing, pelvis height, tilt, fallen flag, runtime errors.")
+    def teleop_status(self) -> dict:
+        return self.kit.call("teleop_g1_status()", timeout=30)
+
+    @tool("Manual walk command for the G1 while teleop runs (testing without the suit, or a joystick): vx, vy in m/s, wz in "
+          "rad/s, h pelvis height in m (0.45-0.72). clear=true returns walking to the suit.")
+    def teleop_command(self, vx: float = 0.0, vy: float = 0.0, wz: float = 0.0, h: float = 0.72, clear: bool = False) -> dict:
+        return self.kit.call(f"teleop_g1_command({float(vx)}, {float(vy)}, {float(wz)}, {float(h)}, {bool(clear)})", timeout=30)
+
+    @tool("Stop teleoperation: stops the simulation and restores the world pin and physics rate.")
+    def teleop_stop(self) -> dict:
+        return self.kit.call("teleop_g1_stop()", timeout=60)
+
+    @tool("Listen for Rokoko Studio's live stream on this PC for a few seconds (only while teleop is not running): frames, "
+          "fps, format, actors, whether body and gloves are present.")
+    def rokoko_listen(self, seconds: float = 3.0, port: int = 14043) -> dict:
+        from . import rokoko
+        try:
+            rx = rokoko.Receiver(int(port))
+        except OSError as e:
+            return {"ok": False, "error": f"port {port} is busy ({e}); teleop may be running: use teleop_status"}
+        t0 = time.time()
+        while time.time() - t0 < seconds:
+            rx.poll(); time.sleep(0.01)
+        st = rx.status(); rx.close()
+        st["ok"] = st["frames"] > 0
+        if not st["ok"]:
+            st["hint"] = "Rokoko Studio: Livestreaming > Custom > settings: Include connection, UDP, JSON v3 (or v4), forward IP 127.0.0.1, port 14043, then Activate"
+        return st
 
     # ---------- ROS 2 bridge (Isaac Sim <-> ROS 2 in WSL / Linux) ----------
     @tool("One-time ROS 2 bridge setup between Isaac Sim on this PC and ROS 2 in WSL: Fast DDS UDP profile with unicast "

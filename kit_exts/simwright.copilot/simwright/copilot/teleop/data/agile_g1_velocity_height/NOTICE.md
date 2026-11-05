@@ -1,0 +1,1 @@
+Policy weights from NVIDIA WBC-AGILE (https://github.com/nvidia-isaac/WBC-AGILE), Apache License 2.0, Copyright NVIDIA CORPORATION & AFFILIATES. Converted from Velocity-Height-G1-History-v0.onnx (sha256 f9a8dfcb...) to a NumPy graph; outputs verified equal to onnxruntime within 2.3e-5.
