@@ -32,6 +32,11 @@ def profile_xml(peers: list[str] | None = None) -> str:
         <transport_descriptor>
             <transport_id>UdpTransport</transport_id>
             <type>UDPv4</type>
+            <!-- Keep every datagram under one packet: IP fragments do not survive the Windows <-> WSL hop,
+                 so larger messages (a 60-joint JointState, camera images) must be fragmented by DDS itself. -->
+            <maxMessageSize>1400</maxMessageSize>
+            <sendBufferSize>4194304</sendBufferSize>
+            <receiveBufferSize>4194304</receiveBufferSize>
         </transport_descriptor>
     </transport_descriptors>
     <participant profile_name="udp_transport_profile" is_default_profile="true">
@@ -112,14 +117,19 @@ export ROS_DOMAIN_ID={int(domain)} RMW_IMPLEMENTATION=rmw_fastrtps_cpp FASTRTPS_
 ros2 daemon stop >/dev/null 2>&1
 TOPICS=""
 for i in 1 2 3 4 5 6; do   # discovery can take a few seconds after the publishers appear
-  TOPICS=$(timeout 8 ros2 topic list 2>/dev/null | tr '\\n' ' ')
+  TOPICS=$(timeout 10 ros2 topic list --no-daemon --spin-time 4 2>/dev/null | tr '\\n' ' ')
   case "$TOPICS" in *{first}*) break;; esac
   sleep 2
 done
-CLOCK=$(timeout 10 ros2 topic echo /clock --once 2>/dev/null | grep -m1 'sec:' | tr -dc '0-9')
+CLOCK=$(timeout 10 ros2 topic echo /clock rosgraph_msgs/msg/Clock --once 2>/dev/null | grep -m1 'sec:' | tr -dc '0-9')
 RATES=""
-for t in {ts}; do r=$(timeout {seconds} ros2 topic hz $t 2>/dev/null | grep -m1 'average rate' | grep -oE '[0-9.]+'); RATES="$RATES\\"$t\\": \\"${{r:-0}}\\","; done
-echo "SWJSON {{\\"topics\\": \\"$TOPICS\\", \\"clock_sec\\": \\"$CLOCK\\", \\"rates\\": {{${{RATES%,}}}}}}"
+LOST=""
+for t in {ts}; do
+  o=$(timeout {seconds} ros2 topic hz $t 2>&1); r=$(echo "$o" | grep -m1 'average rate' | grep -oE '[0-9.]+')
+  echo "$o" | grep -q 'message was lost' && LOST="$LOST $t"
+  RATES="$RATES\\"$t\\": \\"${{r:-0}}\\","
+done
+echo "SWJSON {{\\"topics\\": \\"$TOPICS\\", \\"clock_sec\\": \\"$CLOCK\\", \\"lost\\": \\"$LOST\\", \\"rates\\": {{${{RATES%,}}}}}}"
 """
 
 
@@ -131,7 +141,9 @@ def parse_check(out: str) -> dict:
     topics = sorted(t for t in j.get("topics", "").split() if t)
     rates = {k: float(v or 0) for k, v in (j.get("rates") or {}).items()}
     sim_topics = [t for t in topics if t not in ("/parameter_events", "/rosout")]
-    return {"ok": bool(j.get("clock_sec")) and all(v > 0 for v in rates.values()), "topics": topics, "from_isaac_sim": sim_topics,
+    lost = sorted(t for t in (j.get("lost") or "").split() if t)
+    return {"ok": bool(j.get("clock_sec")) and all(v > 0 for v in rates.values()) and not lost, "topics": topics, "from_isaac_sim": sim_topics,
+            "messages_lost_on": lost,
             "clock_sec": int(j["clock_sec"]) if j.get("clock_sec") else None, "rates_hz": rates}
 
 

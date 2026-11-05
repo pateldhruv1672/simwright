@@ -824,6 +824,7 @@ def test_rosbridge_pieces(tmp_path, monkeypatch):
     assert rb.dds_ports(0) == (7400, 7649) and rb.dds_ports(31) == (15150, 15399)
     xml = rb.profile_xml()
     assert "<useBuiltinTransports>false</useBuiltinTransports>" in xml and "<address>127.0.0.1</address>" in xml
+    assert "<maxMessageSize>1400</maxMessageSize>" in xml
     import xml.dom.minidom as md
     md.parseString(xml)                                           # well-formed
     assert "initialPeersList" not in rb.profile_xml([])
@@ -838,6 +839,8 @@ def test_rosbridge_pieces(tmp_path, monkeypatch):
     r = rb.parse_check(out)
     assert r["ok"] and r["from_isaac_sim"] == ["/clock", "/g1/joint_states"] and r["rates_hz"]["/clock"] == 59.8
     bad = rb.parse_check('SWJSON {"topics": "/rosout", "clock_sec": "", "rates": {"/clock": "0"}}')
+    lossy = rb.parse_check('SWJSON {"topics": "/clock /g1/joint_states", "clock_sec": "3", "lost": " /g1/joint_states", "rates": {"/clock": "60"}}')
+    assert not lossy["ok"] and lossy["messages_lost_on"] == ["/g1/joint_states"]
     assert not bad["ok"]
     s = rb.check_script(31, ["/clock", "/a/joint_states"])
     assert "ROS_DOMAIN_ID=31" in s and "SWJSON" in s
